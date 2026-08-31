@@ -7,6 +7,8 @@ public sealed class ReportSchema
     public string ReportPath { get; set; } = "";
     public PageInfo Page { get; set; } = new PageInfo();
     public List<SectionInfo> Sections { get; set; } = new List<SectionInfo>();
+    /// <summary>Database fields the report's data source exposes. Used by addField as the allowed fieldRef set.</summary>
+    public List<FieldInfo> AvailableFields { get; set; } = new List<FieldInfo>();
 }
 
 public sealed class PageInfo
@@ -55,4 +57,17 @@ public sealed class ObjectInfo
     public string? DataSource { get; set; }
     /// <summary>Literal text for Text objects.</summary>
     public string? Text { get; set; }
+}
+
+public sealed class FieldInfo
+{
+    /// <summary>Raw field name, e.g. "stage_name".</summary>
+    public string Name { get; set; } = "";
+    /// <summary>The bindable expression, e.g. "{Command.stage_name}". Use THIS as addField's fieldRef.</summary>
+    public string FormulaForm { get; set; } = "";
+    public string TableAlias { get; set; } = "";
+    /// <summary>String, Number, Currency, DateTime, Date, Time, Boolean, Blob, Other.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Crystal's default heading for this field, useful as addText content.</summary>
+    public string HeadingText { get; set; } = "";
 }
