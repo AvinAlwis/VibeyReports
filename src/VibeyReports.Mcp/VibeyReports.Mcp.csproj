@@ -10,6 +10,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
     <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\VibeyReports.Contracts\VibeyReports.Contracts.csproj" />
