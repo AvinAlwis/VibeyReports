@@ -12,21 +12,49 @@ public static class LayoutPlanValidator
     private static readonly HashSet<string> Alignments =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Left", "Right", "Centre", "Center", "Justified" };
 
+    private static readonly HashSet<string> FontableKinds =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field" };
+
     public static ValidationResult Validate(LayoutPlan plan, ReportSchema schema)
     {
         var result = new ValidationResult { IsValid = true };
         if (plan == null) throw new ArgumentNullException(nameof(plan));
         if (schema == null) throw new ArgumentNullException(nameof(schema));
 
-        // Mutable simulation state: sectionName -> height, objectName -> (section, l, t, w, h)
-        var sectionHeights = schema.Sections.ToDictionary(s => s.Name, s => s.HeightTwips, StringComparer.OrdinalIgnoreCase);
+        // F5: a validator that gates model-generated JSON must return IsValid = false on
+        // malformed input, never throw. A null "operations" array is malformed input.
+        if (plan.Operations == null)
+        {
+            result.Errors.Add(new ValidationError { OperationIndex = -1, Message = "Plan \"operations\" is null." });
+            result.IsValid = false;
+            return result;
+        }
+
+        // F5: a schema with no page information cannot be checked against; that is an
+        // error to report, not a crash to throw.
+        if (schema.Page == null)
+        {
+            result.Errors.Add(new ValidationError { OperationIndex = -1, Message = "Schema has no page information." });
+            result.IsValid = false;
+            return result;
+        }
+
+        var sections = schema.Sections ?? new List<SectionInfo>();
+
+        // Mutable simulation state: sectionName -> height, objectName -> (section, l, t, w, h, kind)
+        // F7: build defensively with an indexer, not ToDictionary, so a duplicate or
+        // case-variant section name cannot crash the validator (last one wins).
+        var sectionHeights = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in sections)
+            sectionHeights[s.Name] = s.HeightTwips;
+
         var objects = new Dictionary<string, SimObject>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in schema.Sections)
+        foreach (var s in sections)
             foreach (var o in s.Objects)
                 objects[o.Name] = new SimObject
                 {
                     Section = s.Name, Left = o.LeftTwips, Top = o.TopTwips,
-                    Width = o.WidthTwips, Height = o.HeightTwips
+                    Width = o.WidthTwips, Height = o.HeightTwips, Kind = o.Kind
                 };
 
         var printableWidth = schema.Page.WidthTwips - schema.Page.MarginLeftTwips - schema.Page.MarginRightTwips;
@@ -35,6 +63,14 @@ public static class LayoutPlanValidator
         for (var i = 0; i < plan.Operations.Count; i++)
         {
             var op = plan.Operations[i];
+            // F5: a null element in the operations array is a validation error at that
+            // index, not a crash.
+            if (op == null)
+            {
+                result.Errors.Add(new ValidationError { OperationIndex = i, Message = "Operation is null." });
+                continue;
+            }
+
             var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight);
             result.Errors.AddRange(errors);
         }
@@ -97,10 +133,22 @@ public static class LayoutPlanValidator
                 var top = op.TopTwips!.Value;
                 if (left < 0) Err("\"leftTwips\" must not be negative.");
                 if (top < 0) Err("\"topTwips\" must not be negative.");
-                if (left + target!.Width > printableWidth)
-                    Err($"Moving \"{op.Target}\" to leftTwips {left} puts its right edge at {left + target.Width}, past the printable width of {printableWidth}.");
-                if (top + target.Height > sectionHeights[target.Section])
-                    Err($"Moving \"{op.Target}\" to topTwips {top} puts its bottom edge at {top + target.Height}, past the height of section \"{target.Section}\" ({sectionHeights[target.Section]}).");
+
+                // F2: compare in long so a huge leftTwips/topTwips cannot wrap the sum
+                // negative and slip past the bound.
+                // F4: "don't make it worse" — real legacy reports routinely already have
+                // objects whose edge sits past the printable margin/section height, and a
+                // move that keeps that edge no worse than it already was must be allowed,
+                // even though a resize or a brand-new object still gets the hard check.
+                var oldRight = (long)target!.Left + target.Width;
+                var oldBottom = (long)target.Top + target.Height;
+                var newRight = (long)left + target.Width;
+                var newBottom = (long)top + target.Height;
+
+                if (newRight > printableWidth && newRight > oldRight)
+                    Err($"Moving \"{op.Target}\" to leftTwips {left} puts its right edge at {newRight}, past the printable width of {printableWidth}.");
+                if (newBottom > sectionHeights[target.Section] && newBottom > oldBottom)
+                    Err($"Moving \"{op.Target}\" to topTwips {top} puts its bottom edge at {newBottom}, past the height of section \"{target.Section}\" ({sectionHeights[target.Section]}).");
                 if (errs.Count == 0) { target.Left = left; target.Top = top; }
                 break;
             }
@@ -113,29 +161,39 @@ public static class LayoutPlanValidator
 
                 var w = op.WidthTwips!.Value;
                 var h = op.HeightTwips!.Value;
-                if (w <= 0) Err("\"widthTwips\" must be greater than zero.");
+                // F3: zero is a legal width (a vertical rule). Only negative is rejected,
+                // matching the height rule and the add branch below.
+                if (w < 0) Err("\"widthTwips\" must not be negative.");
                 if (h < 0) Err("\"heightTwips\" must not be negative.");
                 if (errs.Count > 0) return errs;
 
-                if (target!.Left + w > printableWidth)
-                    Err($"Resizing \"{op.Target}\" to width {w} puts its right edge at {target.Left + w}, past the printable width of {printableWidth}.");
-                if (target.Top + h > sectionHeights[target.Section])
-                    Err($"Resizing \"{op.Target}\" to height {h} puts its bottom edge at {target.Top + h}, past the height of section \"{target.Section}\" ({sectionHeights[target.Section]}).");
+                // F2: long arithmetic so a huge width/height cannot wrap the sum negative.
+                var newRight = (long)target!.Left + w;
+                var newBottom = (long)target.Top + h;
+                if (newRight > printableWidth)
+                    Err($"Resizing \"{op.Target}\" to width {w} puts its right edge at {newRight}, past the printable width of {printableWidth}.");
+                if (newBottom > sectionHeights[target.Section])
+                    Err($"Resizing \"{op.Target}\" to height {h} puts its bottom edge at {newBottom}, past the height of section \"{target.Section}\" ({sectionHeights[target.Section]}).");
                 if (errs.Count == 0) { target.Width = w; target.Height = h; }
                 break;
             }
 
             case LayoutActions.SetFont:
+                // F1: a Line/Box has no font to change; catch it here instead of letting
+                // it pass validation and blow up Task 6's applier mid-plan.
+                if (!IsFontable(target!)) { Err($"Object \"{op.Target}\" is a {target!.Kind} and has no font to change."); break; }
                 if (string.IsNullOrWhiteSpace(op.FontName)) Err("\"setFont\" requires a non-empty \"fontName\".");
                 break;
 
             case LayoutActions.SetFontSize:
+                if (!IsFontable(target!)) { Err($"Object \"{op.Target}\" is a {target!.Kind} and has no font to change."); break; }
                 if (op.FontSizePt is null) Err("\"setFontSize\" requires \"fontSizePt\".");
                 else if (op.FontSizePt < MinFontPt || op.FontSizePt > MaxFontPt)
                     Err($"\"fontSizePt\" must be between {MinFontPt} and {MaxFontPt}; got {op.FontSizePt}.");
                 break;
 
             case LayoutActions.SetBold:
+                if (!IsFontable(target!)) { Err($"Object \"{op.Target}\" is a {target!.Kind} and has no font to change."); break; }
                 if (op.Bold is null) Err("\"setBold\" requires \"bold\".");
                 break;
 
@@ -162,13 +220,20 @@ public static class LayoutPlanValidator
                 if (w < 0 || h < 0) Err("Sizes must not be negative.");
                 if (errs.Count > 0) return errs;
 
-                if (l + w > printableWidth)
-                    Err($"\"{op.NewName}\" would end at {l + w}, past the printable width of {printableWidth}.");
-                if (t + h > sectionHeights[op.Section!])
-                    Err($"\"{op.NewName}\" would end at {t + h}, past the height of section \"{op.Section}\" ({sectionHeights[op.Section!]}).");
+                // F2: long arithmetic so a huge left/top/width/height cannot wrap negative.
+                var right = (long)l + w;
+                var bottom = (long)t + h;
+                if (right > printableWidth)
+                    Err($"\"{op.NewName}\" would end at {right}, past the printable width of {printableWidth}.");
+                if (bottom > sectionHeights[op.Section!])
+                    Err($"\"{op.NewName}\" would end at {bottom}, past the height of section \"{op.Section}\" ({sectionHeights[op.Section!]}).");
 
                 if (errs.Count == 0)
-                    objects[op.NewName!] = new SimObject { Section = op.Section!, Left = l, Top = t, Width = w, Height = h };
+                    objects[op.NewName!] = new SimObject
+                    {
+                        Section = op.Section!, Left = l, Top = t, Width = w, Height = h,
+                        Kind = action == LayoutActions.AddText ? "Text" : action == LayoutActions.AddLine ? "Line" : "Box"
+                    };
                 break;
             }
 
@@ -181,23 +246,41 @@ public static class LayoutPlanValidator
                     Err($"Section height {h} exceeds the printable height of {printableHeight}.");
                 else
                 {
-                    // Shrinking must not orphan an object that is already placed lower down.
+                    // Shrinking must not orphan an object that is already placed lower down
+                    // (including one added earlier in this same plan).
                     foreach (var kv in objects.Where(k => string.Equals(k.Value.Section, op.Section, StringComparison.OrdinalIgnoreCase)))
-                        if (kv.Value.Top + kv.Value.Height > h)
-                            Err($"Shrinking section \"{op.Section}\" to {h} would clip \"{kv.Key}\", which ends at {kv.Value.Top + kv.Value.Height}.");
+                    {
+                        // F2: long arithmetic so a huge Top/Height on a simulated object
+                        // cannot wrap the sum negative and dodge the clip check.
+                        var bottom = (long)kv.Value.Top + kv.Value.Height;
+                        if (bottom > h)
+                            Err($"Shrinking section \"{op.Section}\" to {h} would clip \"{kv.Key}\", which ends at {bottom}.");
+                    }
 
                     if (errs.Count == 0) sectionHeights[op.Section!] = h;
                 }
                 break;
             }
+
+            default:
+                // F6: LayoutActions.All is the allowlist and this switch is the
+                // enforcement. An eleventh constant added to All without a matching case
+                // must not pass validation with zero checks — it must fail loud here,
+                // not silently, before it ever reaches Task 6's own throw.
+                Err($"\"{action}\" is allowlisted but has no validation rule.");
+                break;
         }
 
         return errs;
     }
 
+    private static bool IsFontable(SimObject o) =>
+        FontableKinds.Contains(o.Kind ?? "");
+
     private sealed class SimObject
     {
         public string Section = "";
+        public string Kind = "";
         public int Left, Top, Width, Height;
     }
 }

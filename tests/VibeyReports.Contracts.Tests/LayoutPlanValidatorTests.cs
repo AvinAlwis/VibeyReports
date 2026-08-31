@@ -21,7 +21,14 @@ public class LayoutPlanValidatorTests
             new SectionInfo
             {
                 Name = "Section1", Kind = "ReportHeader", HeightTwips = 800,
-                Objects = { new ObjectInfo { Name = "Title", Kind = "Text", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300 } }
+                Objects =
+                {
+                    new ObjectInfo { Name = "Title", Kind = "Text", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300 },
+                    // Kind = "Line": what ReportReader emits for a Crystal line, and what addLine creates. Used by F1/T4.
+                    new ObjectInfo { Name = "HeaderRule", Kind = "Line", LeftTwips = 0, TopTwips = 350, WidthTwips = 3000, HeightTwips = 0 },
+                    // Already overflowing the printable width (12240 - 720 - 720 = 10800; right edge = 9000 + 3000 = 12000). Used by F4/T1/T8.
+                    new ObjectInfo { Name = "Wide", Kind = "Text", LeftTwips = 9000, TopTwips = 500, WidthTwips = 3000, HeightTwips = 100 }
+                }
             },
             new SectionInfo
             {
@@ -224,6 +231,210 @@ public class LayoutPlanValidatorTests
         var result = LayoutPlanValidator.Validate(plan, Schema());
 
         result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    // --- Round 1 fix regression tests (T1-T9) ---
+
+    [Fact]
+    public void Validate_LeavesStateUntouchedWhenAnOperationIsRejected()
+    {
+        // "Wide" already overflows (right edge 12000 > printable width 10800). Op 0 is an
+        // invalid move (negative leftTwips) that must be rejected AND must not mutate the
+        // simulated position. Op 1 only passes the "don't make it worse" check in move if
+        // op 0's rejected leftTwips=-50000 was never applied to Wide's simulated Left —
+        // if it had been, Wide's baseline right edge would look wildly negative and op 1's
+        // real move (which is still an improvement over the true original position) would
+        // wrongly appear to make things worse and get rejected too.
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.Move, Target = "Wide", LeftTwips = -50000, TopTwips = 500 },
+            new LayoutOperation { Action = LayoutActions.Move, Target = "Wide", LeftTwips = 8000, TopTwips = 500 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.Errors.Should().ContainSingle(because: string.Join("; ", result.Errors.ConvertAll(e => $"[{e.OperationIndex}] {e.Message}")));
+        result.Errors[0].OperationIndex.Should().Be(0);
+    }
+
+    [Fact]
+    public void Validate_RejectsResizeSectionThatWouldClipAnObjectAddedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Note1", Text = "hi",
+                LeftTwips = 0, TopTwips = 500, WidthTwips = 100, HeightTwips = 200
+            },
+            new LayoutOperation { Action = LayoutActions.ResizeSection, Section = "Section1", HeightTwips = 600 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("Note1");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddHappyPathIncludingZeroWidthAndZeroHeightRules()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Note2", Text = "hi",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 50
+            },
+            // Horizontal rule: heightTwips = 0.
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddLine, Section = "Section1", NewName = "HRule1",
+                LeftTwips = 0, TopTwips = 600, WidthTwips = 1000, HeightTwips = 0
+            },
+            // Vertical rule: widthTwips = 0.
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddLine, Section = "Section1", NewName = "VRule1",
+                LeftTwips = 0, TopTwips = 600, WidthTwips = 0, HeightTwips = 100
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsFontOperationsOnANonTextNonFieldObject()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.SetBold, Target = "HeaderRule", Bold = true },
+            new LayoutOperation { Action = LayoutActions.SetFont, Target = "HeaderRule", FontName = "Arial" },
+            new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "HeaderRule", FontSizePt = 10f });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().HaveCount(3);
+        result.Errors.Should().OnlyContain(e => e.Message.Contains("HeaderRule") && e.Message.Contains("Line"));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBoldOnATextObject()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetBold, Target = "Title", Bold = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsActionWithWrongCasing()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = "Move", Target = "CustomerName", LeftTwips = 10, TopTwips = 10 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("not a supported action");
+    }
+
+    [Fact]
+    public void Validate_RejectsNewNameCollidingWithAnObjectAddedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Dup1", Text = "hi",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 50
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Dup1", Text = "again",
+                LeftTwips = 0, TopTwips = 100, WidthTwips = 100, HeightTwips = 50
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("already exists");
+    }
+
+    [Fact]
+    public void Validate_RejectsLeftTwipsThatWouldOverflowIntArithmetic()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.Move, Target = "CustomerName", LeftTwips = 2147483000, TopTwips = 0
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("printable width");
+    }
+
+    [Fact]
+    public void Validate_AllowsPureVerticalMoveOnAnAlreadyOverflowingObject()
+    {
+        // Same leftTwips as "Wide" already has (9000) — a purely vertical move.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.Move, Target = "Wide", LeftTwips = 9000, TopTwips = 600
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AllowsMoveThatReducesButDoesNotEliminateOverflowOnAnAlreadyOverflowingObject()
+    {
+        // Right edge goes from 12000 to 11000 - still past the 10800 printable width, but an improvement.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.Move, Target = "Wide", LeftTwips = 8000, TopTwips = 500
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsMoveThatWorsensOverflowOnAnAlreadyOverflowingObject()
+    {
+        // Right edge goes from 12000 to 12500 - a strict regression, must be rejected.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.Move, Target = "Wide", LeftTwips = 9500, TopTwips = 500
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("printable width");
+    }
+
+    [Fact]
+    public void Validate_ReturnsInvalidRatherThanThrowingWhenOperationsIsNull()
+    {
+        var plan = new LayoutPlan { PlanVersion = 1, Operations = null! };
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_ReturnsInvalidRatherThanThrowingWhenAnOperationElementIsNull()
+    {
+        var plan = new LayoutPlan { PlanVersion = 1, Operations = { null! } };
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
     }
 }
 
