@@ -1,19 +1,122 @@
 using System;
+using System.IO;
+using System.Text;
+using System.Text.Json;
+using VibeyReports.Contracts;
 
 namespace VibeyReports.CrystalWorker
 {
     /// <summary>
-    /// Entry point required because the project is built as an Exe (OutputType=Exe) so that
-    /// the worker can eventually be launched as a standalone x86 process by later tasks.
-    /// There is no CLI surface yet — Task 4 only proves CrystalSession can bind to the RAS SDK.
-    /// Task 8 replaces this stub with the real worker entry point.
+    /// The worker's real entry point (Task 8). Reads exactly one JSON <see cref="WorkerRequest"/>
+    /// from stdin and writes exactly one JSON <see cref="WorkerResponse"/> to stdout - nothing else
+    /// ever touches stdout. Every diagnostic (exception detail, trace) goes to stderr instead, so a
+    /// parent process (Task 9's CrystalWorkerClient) can always deserialize stdout without having to
+    /// separate signal from noise.
     /// </summary>
-    public static class Program
+    internal static class Program
     {
-        public static int Main(string[] args)
+        [STAThread]
+        private static int Main()
         {
-            Console.WriteLine("VibeyReports.CrystalWorker: no command specified.");
+            // task-8-supplement.md C1 (Critical): Encoding.UTF8 is constructed with
+            // encoderShouldEmitUTF8Identifier: true, so assigning it to Console.OutputEncoding can
+            // emit a UTF-8 byte-order mark (EF BB BF) ahead of the JSON. A leading BOM makes
+            // JsonSerializer.Deserialize throw on the client side ('0xEF' is an invalid start of a
+            // value) - a failure that looks exactly like a worker crash across a process boundary.
+            // A BOM-less UTF8Encoding avoids it.
+            var bomless = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            Console.OutputEncoding = bomless;
+
+            WorkerResponse response;
+            try
+            {
+                var raw = Console.In.ReadToEnd();
+                var request = JsonSerializer.Deserialize<WorkerRequest>(raw, VibeyJson.Options);
+                if (request == null) throw new InvalidOperationException("Empty request.");
+
+                response = Handle(request);
+            }
+            catch (Exception ex)
+            {
+                // Diagnostics go to stderr only - stdout is reserved for the single JSON response.
+                Console.Error.WriteLine(ex.ToString());
+                response = WorkerResponse.Failure(ex.Message);
+            }
+
+            Console.Out.Write(JsonSerializer.Serialize(response, VibeyJson.Options));
+            Console.Out.Flush();
+
+            // Exit code 0 whenever a JSON response was produced, including ok:false. Non-zero would
+            // signal the worker crashed before it could answer at all, which is not what happened
+            // here even on a failure path.
             return 0;
+        }
+
+        private static WorkerResponse Handle(WorkerRequest request)
+        {
+            switch (request.Command)
+            {
+                case WorkerCommands.Read:
+                    using (var session = CrystalSession.Open(request.ReportPath))
+                    {
+                        var response = WorkerResponse.Success();
+                        response.Schema = ReportReader.Read(session);
+                        return response;
+                    }
+
+                case WorkerCommands.Apply:
+                {
+                    if (request.Plan == null) return WorkerResponse.Failure("\"apply\" requires a \"plan\".");
+                    if (string.IsNullOrWhiteSpace(request.OutputPath)) return WorkerResponse.Failure("\"apply\" requires an \"outputPath\".");
+
+                    using (var session = CrystalSession.Open(request.ReportPath))
+                    {
+                        int applied;
+                        try
+                        {
+                            // The ONLY entry point into LayoutApplier. Apply validates the plan
+                            // against the report's current schema before it mutates anything; the
+                            // internal ApplyOperationsWithoutValidation seam that skips validation
+                            // is never called here (task-8-supplement.md C3).
+                            applied = LayoutApplier.Apply(session, request.Plan);
+                        }
+                        catch (LayoutApplier.InvalidPlanException ex)
+                        {
+                            // Validation failed before any mutation touched the document: the
+                            // session is not faulted and nothing has been written.
+                            return WorkerResponse.Failure("Layout plan failed validation.", ex.Result);
+                        }
+
+                        // If a mid-plan failure had occurred, LayoutApplier would have marked the
+                        // session faulted and thrown; that exception is not caught here, so it
+                        // propagates to Main's outer catch, and SaveAs is never reached - no output
+                        // file is written (task-8-supplement.md C4).
+                        session.SaveAs(request.OutputPath, request.Overwrite);
+
+                        var response = WorkerResponse.Success();
+                        response.OperationsApplied = applied;
+                        response.OutputPath = Path.GetFullPath(request.OutputPath);
+                        response.Schema = ReportReader.Read(session);
+                        return response;
+                    }
+                }
+
+                case WorkerCommands.Render:
+                    using (var session = CrystalSession.Open(request.ReportPath))
+                    {
+                        var response = WorkerResponse.Success();
+                        // ReportRenderer.ExportPdf's InvalidOperationException carries an actionable,
+                        // report-specific message (task-8-supplement.md C6); it is intentionally not
+                        // caught here so Main's outer catch surfaces ex.Message verbatim in
+                        // WorkerResponse.Error instead of a generic string.
+                        response.PdfBase64 = Convert.ToBase64String(ReportRenderer.ExportPdf(session));
+                        return response;
+                    }
+
+                default:
+                    return WorkerResponse.Failure(
+                        $"\"{request.Command}\" is not a supported command. Supported: {string.Join(", ", WorkerCommands.All)}.");
+            }
         }
     }
 }
