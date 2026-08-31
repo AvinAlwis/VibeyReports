@@ -1194,9 +1194,14 @@ public class CrystalSessionTests
     {
         using var session = CrystalSession.Open(Fixtures.SampleReport);
 
-        var sections = session.Document.ReportDefController.ReportDefinition.Sections;
+        var areas = session.Document.ReportDefController.ReportDefinition.Areas;
 
-        sections.Count.Should().BeGreaterThan(0);
+        var sectionCount = 0;
+        for (var i = 0; i < areas.Count; i++)
+            sectionCount += areas[i].Sections.Count;
+
+        areas.Count.Should().BeGreaterThan(0);
+        sectionCount.Should().BeGreaterThan(0);
     }
 
     [Fact]
@@ -1287,7 +1292,8 @@ Expected: FAIL — `The type or namespace name 'CrystalSession' could not be fou
 ```csharp
 using System;
 using System.IO;
-using CrystalDecisions.ReportAppServer.ClientDoc;
+using CrystalDecisions.CrystalReports.Engine;      // ReportDocument — the open path
+using CrystalDecisions.ReportAppServer.ClientDoc;  // ISCDReportClientDocument — the bridge
 
 namespace VibeyReports.CrystalWorker
 {
@@ -1296,12 +1302,13 @@ namespace VibeyReports.CrystalWorker
     /// </summary>
     public sealed class CrystalSession : IDisposable
     {
-        private ReportClientDocument _doc;
+        // The classic engine owns the file; the RAS client document is a bridge off it.
+        private ReportDocument _engineDoc;
         private bool _disposed;
 
-        private CrystalSession(ReportClientDocument doc, string sourcePath)
+        private CrystalSession(ReportDocument engineDoc, string sourcePath)
         {
-            _doc = doc;
+            _engineDoc = engineDoc;
             SourcePath = sourcePath;
         }
 
@@ -1312,7 +1319,7 @@ namespace VibeyReports.CrystalWorker
             get
             {
                 if (_disposed) throw new ObjectDisposedException(nameof(CrystalSession));
-                return _doc;
+                return _engineDoc.ReportClientDocument;
             }
         }
 
@@ -1323,13 +1330,15 @@ namespace VibeyReports.CrystalWorker
             var full = Path.GetFullPath(rptPath);
             if (!File.Exists(full)) throw new FileNotFoundException($"Report not found: {full}", full);
 
-            var doc = new ReportClientDocument();
-            // Keep the document open until we dispose it explicitly.
-            doc.set_AutoClose(false);
-            // 0 = default open options.
-            doc.Open(full, 0);
+            // CRITICAL: never `new ReportClientDocument()`. That activates the standalone RAS COM
+            // server, which TCP self-connects to port 1566 and hangs (~20-24s, then COMException
+            // "Failed to connect to server"). Opening through the classic engine and taking the
+            // .ReportClientDocument bridge off it costs ~2ms and makes no network connection.
+            // Measured on this machine; this is also how D:\RptToXml does it.
+            var engineDoc = new ReportDocument();
+            engineDoc.Load(full);
 
-            return new CrystalSession(doc, full);
+            return new CrystalSession(engineDoc, full);
         }
 
         public void SaveAs(string destinationPath, bool overwrite)
@@ -1350,7 +1359,7 @@ namespace VibeyReports.CrystalWorker
             if (File.Exists(full)) File.Delete(full);
 
             // SaveAs(name, directory, options). 0 = crReportOptionDefault.
-            _doc.SaveAs(Path.GetFileName(full), dir, 0);
+            Document.SaveAs(Path.GetFileName(full), dir, 0);
         }
 
         public void Dispose()
@@ -1360,14 +1369,14 @@ namespace VibeyReports.CrystalWorker
 
             try
             {
-                if (_doc != null && _doc.IsOpen) _doc.Close();
+                if (_engineDoc != null && _engineDoc.IsLoaded) _engineDoc.Close();
             }
             catch
             {
                 // A failed Close must not mask the real error from the caller.
             }
 
-            _doc = null;
+            _engineDoc = null;
         }
     }
 }
@@ -1564,25 +1573,34 @@ namespace VibeyReports.CrystalWorker
                     : "Portrait"
             };
 
-            var sections = doc.ReportDefController.ReportDefinition.Sections;
-            for (var i = 0; i < sections.Count; i++)
+            // VERIFIED: ISCRReportDefinition has NO `Sections` property. Sections live on Areas,
+            // and ISCRArea.Kind carries the band. Walk Areas, not Sections.
+            var areas = doc.ReportDefController.ReportDefinition.Areas;
+            for (var a = 0; a < areas.Count; a++)
             {
-                var section = sections[i];
-                var info = new SectionInfo
-                {
-                    Name = section.Name,
-                    Kind = ClassifySection(section.Name),
-                    HeightTwips = section.Height,
-                    Suppressed = section.Format != null && section.Format.EnableSuppress
-                };
+                var area = areas[a];
+                var band = ClassifyArea(area.Kind);
+                var sections = area.Sections;
 
-                var objects = section.ReportObjects;
-                for (var j = 0; j < objects.Count; j++)
+                for (var i = 0; i < sections.Count; i++)
                 {
-                    info.Objects.Add(ReadObject((ISCRReportObject)objects[j]));
+                    var section = sections[i];
+                    var info = new SectionInfo
+                    {
+                        Name = section.Name,
+                        Kind = band,
+                        HeightTwips = section.Height,
+                        Suppressed = section.Format != null && section.Format.EnableSuppress
+                    };
+
+                    var objects = section.ReportObjects;
+                    for (var j = 0; j < objects.Count; j++)
+                    {
+                        info.Objects.Add(ReadObject((ISCRReportObject)objects[j]));
+                    }
+
+                    schema.Sections.Add(info);
                 }
-
-                schema.Sections.Add(info);
             }
 
             return schema;
@@ -1660,20 +1678,23 @@ namespace VibeyReports.CrystalWorker
         }
 
         /// <summary>
-        /// RAS section names encode the band, e.g. "Section1" in area "ReportHeaderArea".
-        /// We classify by the report definition's area name prefix, which the section name mirrors.
+        /// The band comes from the parent Area's Kind, NOT from the section name.
+        /// RAS names sections "Section1", "Section2"... with no band encoded, so any
+        /// name-based heuristic returns "Other" for everything.
         /// </summary>
-        private static string ClassifySection(string sectionName)
+        private static string ClassifyArea(CrAreaSectionKindEnum kind)
         {
-            var n = (sectionName ?? "").ToUpperInvariant();
-            if (n.Contains("REPORTHEADER")) return "ReportHeader";
-            if (n.Contains("PAGEHEADER")) return "PageHeader";
-            if (n.Contains("GROUPHEADER")) return "GroupHeader";
-            if (n.Contains("DETAIL")) return "Details";
-            if (n.Contains("GROUPFOOTER")) return "GroupFooter";
-            if (n.Contains("REPORTFOOTER")) return "ReportFooter";
-            if (n.Contains("PAGEFOOTER")) return "PageFooter";
-            return "Other";
+            switch (kind)
+            {
+                case CrAreaSectionKindEnum.crAreaSectionKindReportHeader: return "ReportHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindPageHeader: return "PageHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindGroupHeader: return "GroupHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindDetail: return "Details";
+                case CrAreaSectionKindEnum.crAreaSectionKindGroupFooter: return "GroupFooter";
+                case CrAreaSectionKindEnum.crAreaSectionKindReportFooter: return "ReportFooter";
+                case CrAreaSectionKindEnum.crAreaSectionKindPageFooter: return "PageFooter";
+                default: return "Other";
+            }
         }
     }
 }
@@ -1687,7 +1708,17 @@ cd /d/VibeyReports && dotnet test tests/VibeyReports.CrystalWorker.Tests --filte
 
 Expected: PASS, 9 tests.
 
-**If `Read_ClassifiesSectionsIntoRecognisableBands` fails** because every section comes back `"Other"`: RAS names sections `Section1`, `Section2`… rather than encoding the band. Replace `ClassifySection(section.Name)` with a lookup over the areas — iterate `doc.ReportDefController.ReportDefinition.Areas`, and for each area use `area.Kind` (`CrAreaSectionKindEnum`: `crAreaSectionKindReportHeader`, `crAreaSectionKindPageHeader`, `crAreaSectionKindGroupHeader`, `crAreaSectionKindDetail`, `crAreaSectionKindGroupFooter`, `crAreaSectionKindReportFooter`, `crAreaSectionKindPageFooter`) to label each of `area.Sections`. Build a `Dictionary<string,string>` from section name to band before the section loop and read from it. Keep the test unchanged — it is asserting the right thing.
+**Confirmed area/section shape on this machine.** Walking `Areas` is now the primary path, not a fallback — verified against `SampleReport.rpt`, which yields five areas of one section each:
+
+```
+AREA ReportHeaderArea1 kind=1 sections=1
+AREA PageHeaderArea1   kind=2 sections=1
+AREA DetailArea1       kind=4 sections=1
+AREA PageFooterArea1   kind=7 sections=1
+AREA ReportFooterArea1 kind=8 sections=1
+```
+
+Section names are `Section1`, `Section2`… with no band encoded, which is why the original name-based heuristic would have returned `"Other"` for every section. If `areas[i]` does not compile as an indexer through the engine's RCD wrapper, use `areas.Item(i)`.
 
 - [ ] **Step 5: Commit**
 
@@ -2132,11 +2163,16 @@ namespace VibeyReports.CrystalWorker
             CrystalDecisions.ReportAppServer.ClientDoc.ISCDReportClientDocument doc,
             string sectionName)
         {
-            var sections = doc.ReportDefController.ReportDefinition.Sections;
-            for (var i = 0; i < sections.Count; i++)
+            // Sections live on Areas — ISCRReportDefinition has no Sections property.
+            var areas = doc.ReportDefController.ReportDefinition.Areas;
+            for (var a = 0; a < areas.Count; a++)
             {
-                var s = sections[i];
-                if (string.Equals(s.Name, sectionName, StringComparison.OrdinalIgnoreCase)) return s;
+                var sections = areas[a].Sections;
+                for (var i = 0; i < sections.Count; i++)
+                {
+                    var s = sections[i];
+                    if (string.Equals(s.Name, sectionName, StringComparison.OrdinalIgnoreCase)) return s;
+                }
             }
             throw new InvalidOperationException($"Section \"{sectionName}\" was not found; the validator should have rejected it.");
         }
@@ -3663,7 +3699,9 @@ applier) and multi-page preview (small: add a `page` parameter to `preview_repor
 
 **Type consistency.** `ReportSchema`/`PageInfo`/`SectionInfo`/`ObjectInfo` (Task 1) are consumed unchanged in Tasks 3, 5, 8. `LayoutPlan`/`LayoutOperation`/`LayoutActions` (Task 2) flow through Tasks 3, 6, 8, 9, 10. `LayoutPlanValidator.Validate(plan, schema)` is defined in Task 3 and called with that exact signature in Task 6. `CrystalSession.Open`/`SaveAs`/`Document` (Task 4) are used verbatim in Tasks 5, 6, 7, 8. `ReportReader.Read(session)` (Task 5) is called in Tasks 6 and 8. `LayoutApplier.Apply(session, plan)` and `InvalidPlanException.Result` (Task 6) are caught by name in Task 8. `WorkerRequest`/`WorkerResponse`/`WorkerCommands` (Task 8) are bound by `CrystalWorkerClient` (Task 9) and surfaced by `ReportTools` (Task 10). `CrystalWorkerClient.ReadAsync`/`ApplyAsync`/`RenderAsync` are declared in Task 9 and called in Task 10. All geometry properties are `*Twips` everywhere.
 
-**One known soft spot.** Task 5's `ClassifySection` guesses the band from the section name. RAS may well name sections `Section1`, `Section2`… with the band living on the parent `Area` instead. The test asserts the correct outcome and Step 4 carries the exact fix if it fails, so this surfaces as a red test rather than silently wrong data.
+**~~One known soft spot~~ — CONFIRMED AND FIXED during execution (2026-08-31).** The self-review flagged that `ClassifySection` might be guessing the band from a section name that does not encode it. That is exactly what happened. Reflection against the installed assembly confirmed `ISCRReportDefinition` has **no** `Sections` property at all: sections live on `Areas`, and `ISCRArea.Kind` (`CrAreaSectionKindEnum`) carries the band. Tasks 4, 5 and 6 above have been corrected to walk `Areas`, and `ClassifySection` is replaced by `ClassifyArea(area.Kind)`.
+
+**A second defect the plan did not anticipate.** `new ReportClientDocument()` activates the standalone RAS COM server, which TCP self-connects to port 1566 and hangs (~20-24s, then `COMException: Failed to connect to server`). Reports must be opened through the classic engine — `ReportDocument.Load(path)`, then `.ReportClientDocument` — which costs ~2ms and makes no network connection. Measured on this machine, and the full write path (clone → `Modify` → `SaveAs` → reopen → change persisted, source untouched) was verified through that bridge before the correction was written into the plan.
 
 ---
 

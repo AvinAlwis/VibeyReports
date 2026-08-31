@@ -6,6 +6,7 @@ namespace VibeyReports.CrystalWorker
     /// Entry point required because the project is built as an Exe (OutputType=Exe) so that
     /// the worker can eventually be launched as a standalone x86 process by later tasks.
     /// There is no CLI surface yet — Task 4 only proves CrystalSession can bind to the RAS SDK.
+    /// Task 8 replaces this stub with the real worker entry point.
     /// </summary>
     public static class Program
     {

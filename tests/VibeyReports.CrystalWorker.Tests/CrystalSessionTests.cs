@@ -38,24 +38,24 @@ public class CrystalSessionTests
         session.Document.ReportDefController.Should().NotBeNull();
     }
 
-    [Fact(Skip =
-        "BLOCKED pending orchestrator confirmation: brief assumes ReportDefinition.Sections exists. " +
-        "Reflection against the real 11.5.3300.0 CrystalDecisions.ReportAppServer.ReportDefModel.dll shows " +
-        "ISCRReportDefinition has no Sections member at all - it exposes Areas (ISCRAreas, a collection of " +
-        "ISCRArea). Sections lives one level down, on each ISCRArea (Area.Sections), not on ReportDefinition " +
-        "directly. This is a genuine brief/SDK mismatch, not a guess - see task-4-report.md for the full " +
-        "reflected member list. Left as Skip rather than silently rewritten, per the instruction not to " +
-        "weaken/delete a brief-provided test without confirmation.")]
+    [Fact]
     public void Open_ExposesAtLeastOneSection()
     {
+        // ReportDefinition has no Sections member - confirmed by reflection against the real
+        // 11.5.3300.0 CrystalDecisions.ReportAppServer.ReportDefModel.dll (see task-4-report.md,
+        // "Deviation 4 / B2"). It exposes Areas instead, and each Area carries its own Sections
+        // collection. This walks areas to preserve the original test's intent (the report exposes
+        // at least one section) against the real object model.
         using var session = CrystalSession.Open(Fixtures.SampleReport);
 
-        // Original brief code below does not compile against the real 11.5.3300.0 SDK -
-        // ISCRReportDefinition has no Sections member (see Skip reason above). Left commented,
-        // not rewritten, pending orchestrator confirmation of the correct replacement
-        // (e.g. ReportDefinition.Areas[i].Sections.Count summed across areas).
-        // var sections = session.Document.ReportDefController.ReportDefinition.Sections;
-        // sections.Count.Should().BeGreaterThan(0);
+        var areas = session.Document.ReportDefController.ReportDefinition.Areas;
+
+        var sectionCount = 0;
+        for (var i = 0; i < areas.Count; i++)
+            sectionCount += areas[i].Sections.Count;
+
+        areas.Count.Should().BeGreaterThan(0);
+        sectionCount.Should().BeGreaterThan(0);
     }
 
     [Fact]

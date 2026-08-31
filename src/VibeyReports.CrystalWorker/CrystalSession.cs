@@ -1,20 +1,31 @@
 using System;
 using System.IO;
+using CrystalDecisions.CrystalReports.Engine;
 using CrystalDecisions.ReportAppServer.ClientDoc;
 
 namespace VibeyReports.CrystalWorker
 {
     /// <summary>
-    /// Owns one open ReportClientDocument. All Crystal XI R2 interaction goes through here.
+    /// Owns one open report. All Crystal XI R2 interaction goes through here.
     /// </summary>
+    /// <remarks>
+    /// We open through the classic engine (<see cref="ReportDocument"/>) and take the in-process RAS
+    /// bridge off it (<see cref="ReportDocument.ReportClientDocument"/>), rather than constructing
+    /// <c>ReportClientDocument</c> directly. Constructing it directly activates the standalone RAS COM
+    /// server, which attempts a same-machine TCP self-connect on port 1566 that hangs indefinitely in
+    /// this environment (COMException: "Failed to connect to server &lt;hostname&gt;") - see
+    /// task-4-report.md for the full diagnosis. The engine-owned bridge costs ~2ms and makes no network
+    /// connection; the full RAS object model (ReportDefController, SaveAs, etc.) is reachable through it.
+    /// This is also how D:\RptToXml opens reports.
+    /// </remarks>
     public sealed class CrystalSession : IDisposable
     {
-        private ReportClientDocument _doc;
+        private ReportDocument _engineDoc;
         private bool _disposed;
 
-        private CrystalSession(ReportClientDocument doc, string sourcePath)
+        private CrystalSession(ReportDocument engineDoc, string sourcePath)
         {
-            _doc = doc;
+            _engineDoc = engineDoc;
             SourcePath = sourcePath;
         }
 
@@ -25,7 +36,7 @@ namespace VibeyReports.CrystalWorker
             get
             {
                 if (_disposed) throw new ObjectDisposedException(nameof(CrystalSession));
-                return _doc;
+                return _engineDoc.ReportClientDocument;
             }
         }
 
@@ -36,19 +47,11 @@ namespace VibeyReports.CrystalWorker
             var full = Path.GetFullPath(rptPath);
             if (!File.Exists(full)) throw new FileNotFoundException($"Report not found: {full}", full);
 
-            var doc = new ReportClientDocument();
-            // Keep the document open until we dispose it explicitly.
-            // NOTE: the brief's ground truth says AutoClose is exposed via get_AutoClose/set_AutoClose
-            // accessor methods, and to call doc.set_AutoClose(false) if the property assignment does not
-            // compile. In practice it is the other way around here: the interop layer synthesizes a real
-            // C# property named AutoClose from those accessor methods, so calling set_AutoClose(...)
-            // directly is rejected by the compiler (CS0571 - cannot explicitly call operator or accessor).
-            // The property assignment is what actually compiles.
-            doc.AutoClose = false;
-            // 0 = default open options.
-            doc.Open(full, 0);
+            var engineDoc = new ReportDocument();
+            // NOT new ReportClientDocument() - see the class remarks above.
+            engineDoc.Load(full);
 
-            return new CrystalSession(doc, full);
+            return new CrystalSession(engineDoc, full);
         }
 
         public void SaveAs(string destinationPath, bool overwrite)
@@ -69,7 +72,7 @@ namespace VibeyReports.CrystalWorker
             if (File.Exists(full)) File.Delete(full);
 
             // SaveAs(name, directory, options). 0 = crReportOptionDefault.
-            _doc.SaveAs(Path.GetFileName(full), dir, 0);
+            Document.SaveAs(Path.GetFileName(full), dir, 0);
         }
 
         public void Dispose()
@@ -79,14 +82,14 @@ namespace VibeyReports.CrystalWorker
 
             try
             {
-                if (_doc != null && _doc.IsOpen) _doc.Close();
+                if (_engineDoc != null && _engineDoc.IsLoaded) _engineDoc.Close();
             }
             catch
             {
                 // A failed Close must not mask the real error from the caller.
             }
 
-            _doc = null;
+            _engineDoc = null;
         }
     }
 }
