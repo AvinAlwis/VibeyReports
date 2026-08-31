@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+dist/
+
+# SDD scratch workspace (git-ignored by design)
+.superpowers/
+
+# User-specific
+*.user
+*.suo
+.vs/
+
+# NuGet
+packages/
+*.nupkg
