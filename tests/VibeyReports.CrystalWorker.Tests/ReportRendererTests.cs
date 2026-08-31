@@ -46,7 +46,8 @@ public class ReportRendererTests
 
         act.Should().Throw<InvalidOperationException>()
            .WithMessage("*Documents.rpt*")
-           .WithMessage("*parameter*");
+           .WithMessage("*parameter*")
+           .WithInnerException<System.Runtime.InteropServices.COMException>();
     }
 
     [Theory]
