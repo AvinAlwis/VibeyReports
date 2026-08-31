@@ -319,7 +319,7 @@ namespace VibeyReports.CrystalWorker
             paragraph.ParagraphElements.Add(element);
             text.Paragraphs.Add(paragraph);
 
-            doc.ReportDefController.ReportObjectController.Add(text, section, -1);
+            AddReportObject(doc, section, text, LayoutActions.AddText, op.NewName);
         }
 
         private static void AddLine(
@@ -342,7 +342,7 @@ namespace VibeyReports.CrystalWorker
                 EndSectionName = section.Name
             };
 
-            doc.ReportDefController.ReportObjectController.Add(line, section, -1);
+            AddReportObject(doc, section, line, LayoutActions.AddLine, op.NewName);
         }
 
         private static void AddBox(
@@ -365,7 +365,33 @@ namespace VibeyReports.CrystalWorker
                 EndSectionName = section.Name
             };
 
-            doc.ReportDefController.ReportObjectController.Add(box, section, -1);
+            AddReportObject(doc, section, box, LayoutActions.AddBox, op.NewName);
+        }
+
+        /// <summary>
+        /// Wraps ReportObjectController.Add for a newly constructed object with the same
+        /// COMException -&gt; InvalidOperationException translation AddField already had (round-1
+        /// fix report F2). A validator-legal add can still be rejected by RAS itself - the
+        /// diagonal-line case is one known trigger the validator now closes, but that is not proof
+        /// no others exist - and an unwrapped COMException would reach the caller with no
+        /// indication of which operation, object or section caused it.
+        /// </summary>
+        private static void AddReportObject(
+            ISCDReportClientDocument doc,
+            Section section,
+            ISCRReportObject obj,
+            string action,
+            string newName)
+        {
+            try
+            {
+                doc.ReportDefController.ReportObjectController.Add(obj, section, -1);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"{action}\" for \"{newName}\" in section \"{section.Name}\": {ex.Message.Trim()}", ex);
+            }
         }
 
         /// <summary>

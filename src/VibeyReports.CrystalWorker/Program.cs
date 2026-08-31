@@ -87,16 +87,25 @@ namespace VibeyReports.CrystalWorker
                             return WorkerResponse.Failure("Layout plan failed validation.", ex.Result);
                         }
 
+                        // Read the resulting schema BEFORE saving (round-1 fix F1). ReportReader.Read
+                        // can throw on a freshly-added object read back without a reopen - this is
+                        // the same RAS quirk LayoutApplierTests' ApplyAndReread helper works around by
+                        // closing and reopening. Reading after SaveAs would risk "ok:false" while a
+                        // real .rpt already sits on disk, a state the protocol has no way to express
+                        // and Task 9's client cannot distinguish from a clean failure. Reading first
+                        // makes "ok:false implies nothing was written" structurally true.
+                        var schema = ReportReader.Read(session);
+
                         // If a mid-plan failure had occurred, LayoutApplier would have marked the
-                        // session faulted and thrown; that exception is not caught here, so it
-                        // propagates to Main's outer catch, and SaveAs is never reached - no output
-                        // file is written (task-8-supplement.md C4).
+                        // session faulted and thrown before reaching this line; that exception is not
+                        // caught here, so it propagates to Main's outer catch, and SaveAs is never
+                        // reached - no output file is written (task-8-supplement.md C4).
                         session.SaveAs(request.OutputPath, request.Overwrite);
 
                         var response = WorkerResponse.Success();
                         response.OperationsApplied = applied;
                         response.OutputPath = Path.GetFullPath(request.OutputPath);
-                        response.Schema = ReportReader.Read(session);
+                        response.Schema = schema;
                         return response;
                     }
                 }

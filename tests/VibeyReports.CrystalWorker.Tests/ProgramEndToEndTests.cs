@@ -193,4 +193,75 @@ public class ProgramEndToEndTests
         // '{' is 0x7B. A UTF-8 BOM would put 0xEF 0xBB 0xBF first.
         raw[0].Should().Be((byte)'{', because: "stdout must be parseable JSON with no byte-order mark");
     }
+
+    /// <summary>
+    /// task-8-findings-round1.md T1: AvailableFields is the allowlist for addField, so a worker
+    /// that dropped or truncated it during JSON round-tripping would silently disable that
+    /// operation's security boundary while passing every other test.
+    /// </summary>
+    [Fact]
+    public void Read_ReturnsAvailableFieldsThroughTheWorkerProcess()
+    {
+        var response = Run(new WorkerRequest
+        {
+            Command = WorkerCommands.Read,
+            ReportPath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt")
+        });
+
+        response.Ok.Should().BeTrue(because: response.Error);
+        response.Schema!.AvailableFields.Should().NotBeEmpty(
+            because: "AvailableFields is the allowlist for addField and must survive JSON round-tripping");
+        response.Schema.AvailableFields.Should().OnlyContain(f =>
+            !string.IsNullOrWhiteSpace(f.FormulaForm) && f.FormulaForm.StartsWith("{"));
+    }
+
+    /// <summary>
+    /// task-8-findings-round1.md T2: the only success-path apply test above (
+    /// <see cref="Apply_WritesTheOutputReportAndReportsTheOperationCount"/>) uses setBold, which
+    /// mutates an existing object. Nothing exercises the add paths end to end through the worker
+    /// process -- precisely where F1's post-save read risk lives (a freshly-added object read back
+    /// off the same, un-reopened session).
+    /// </summary>
+    [Fact]
+    public void Apply_AddingATextObject_ReturnsTheNewObjectInTheReturnedSchema()
+    {
+        var reportPath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+
+        var readResponse = Run(new WorkerRequest { Command = WorkerCommands.Read, ReportPath = reportPath });
+        readResponse.Ok.Should().BeTrue(because: readResponse.Error);
+        var sectionName = readResponse.Schema!.Sections.First(s => s.Kind == "Details" && s.HeightTwips >= 400).Name;
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var response = Run(new WorkerRequest
+            {
+                Command = WorkerCommands.Apply,
+                ReportPath = reportPath,
+                OutputPath = dest,
+                Plan = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.AddText, Section = sectionName, NewName = "VibeyAddedText",
+                            Text = "Vibey Reports", LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 320
+                        }
+                    }
+                }
+            });
+
+            response.Ok.Should().BeTrue(because: response.Error);
+            response.OperationsApplied.Should().Be(1);
+            File.Exists(dest).Should().BeTrue();
+
+            var added = response.Schema!.Sections.SelectMany(s => s.Objects)
+                .SingleOrDefault(o => o.Name == "VibeyAddedText");
+            added.Should().NotBeNull();
+            added!.Kind.Should().Be("Text");
+            added.Text.Should().Contain("Vibey Reports");
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
 }
