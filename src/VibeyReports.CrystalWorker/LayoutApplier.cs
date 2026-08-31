@@ -247,22 +247,74 @@ namespace VibeyReports.CrystalWorker
             throw new InvalidOperationException($"Section \"{sectionName}\" was not found; the validator should have rejected it.");
         }
 
+        /// <summary>
+        /// Newly constructed RAS objects come back with FontColor == null, unlike objects already present
+        /// in an .rpt, which makes them unfontable until one is supplied. Inherit the section's existing
+        /// look where possible so an added object matches its neighbours, rather than imposing an arbitrary
+        /// default the caller then has to override.
+        /// </summary>
+        private static FontColorClass DefaultFontColorFor(ISCDReportClientDocument doc, string sectionName)
+        {
+            var section = FindSection(doc, sectionName);
+            var objects = section.ReportObjects;
+            for (var i = 0; i < objects.Count; i++)
+            {
+                ISCRFontColor fontColor;
+                switch (objects[i])
+                {
+                    case ISCRFieldObject field: fontColor = field.FontColor; break;
+                    case ISCRTextObject text: fontColor = text.FontColor; break;
+                    default: continue;
+                }
+
+                if (fontColor?.Font == null) continue;
+
+                var f = fontColor.Font;
+                return new FontColorClass
+                {
+                    Font = new FontClass
+                    {
+                        Name = f.Name,
+                        Size = f.Size,
+                        Bold = f.Bold,
+                        Italic = f.Italic,
+                        Underline = f.Underline,
+                        Strikethrough = f.Strikethrough,
+                        Weight = f.Weight,
+                        Charset = f.Charset
+                    }
+                };
+            }
+
+            return new FontColorClass { Font = new FontClass { Name = "Arial", Size = 10m } };
+        }
+
         private static void AddText(
             ISCDReportClientDocument doc,
             LayoutOperation op)
         {
             var section = FindSection(doc, op.Section);
 
+            // Measured: a text object's rendered/persisted font is actually carried by its
+            // ParagraphTextElementClass run, not by TextObjectClass.FontColor. Setting only the
+            // outer TextObjectClass.FontColor (as AddField does for FieldObjectClass) is silently
+            // discarded by Add() -- the run's own (unset, RAS-default "MS Shell Dlg") font wins --
+            // so the paragraph element needs its own FontColor too. A pre-existing Text object in
+            // an .rpt always has both set to the same font; this matches that shape instead of
+            // relying on undocumented Add()-time behaviour. Two independent calls (rather than
+            // sharing one instance between the two objects) so text and element each hold their
+            // own FontClass, per DefaultFontColorFor's no-shared-state contract.
             var text = new TextObjectClass
             {
                 Name = op.NewName,
                 Left = op.LeftTwips.Value,
                 Top = op.TopTwips.Value,
                 Width = op.WidthTwips.Value,
-                Height = op.HeightTwips.Value
+                Height = op.HeightTwips.Value,
+                FontColor = DefaultFontColorFor(doc, op.Section)
             };
 
-            var element = new ParagraphTextElementClass { Text = op.Text };
+            var element = new ParagraphTextElementClass { Text = op.Text, FontColor = DefaultFontColorFor(doc, op.Section) };
             var paragraph = new ParagraphClass();
             paragraph.ParagraphElements.Add(element);
             text.Paragraphs.Add(paragraph);
@@ -366,9 +418,12 @@ namespace VibeyReports.CrystalWorker
                 // comes back from Add() with FontColor == null, unlike a field already present in an
                 // .rpt. WithFont's ISCRFieldObject arm requires FontColor.Font to be non-null, so any
                 // setFont/setFontSize/setBold on a field addField itself just created would otherwise
-                // fail with "has no font object." Give it a concrete default so it starts fontable,
-                // matching the state every pre-existing field object is already in.
-                FontColor = new FontColorClass { Font = new FontClass { Name = "Arial", Size = 10m } }
+                // fail with "has no font object." See DefaultFontColorFor: rather than imposing a
+                // fixed default, this inherits the look of whatever Text/Field object already sits in
+                // the target section, so an added field matches its neighbours instead of standing out
+                // and needing an explicit setFont to fix it, falling back to Arial 10pt only when the
+                // section has no existing fontable object to copy from.
+                FontColor = DefaultFontColorFor(doc, op.Section)
             };
 
             try

@@ -660,4 +660,124 @@ public class LayoutApplierTests
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
+
+    // --- Task 6c: addText font defaulting ---
+
+    /// <summary>
+    /// Regression test for the reported defect: a freshly constructed TextObjectClass comes back
+    /// from Add() with FontColor == null (mirrors the addField bug T4 fixed in round 1 -- see
+    /// AddField's comment), and WithFont's ISCRTextObject arm requires FontColor.Font to be
+    /// non-null. Before the fix, the SetBold operation below throws InvalidOperationException
+    /// ("has no font object.") because AddText never gave the new text a font. This is the
+    /// project's primary stated use case: four bold column headings over a details band.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsTextThenSetsBoldInOnePlanAndBothSurviveSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddText, Section = sectionName, NewName = "VibeyBoldText",
+                    Text = "Employee Name", LeftTwips = 0, TopTwips = 0, WidthTwips = 2500, HeightTwips = 240
+                },
+                new LayoutOperation { Action = LayoutActions.SetBold, Target = "VibeyBoldText", Bold = true }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                                   .SingleOrDefault(o => o.Name == "VibeyBoldText");
+            added.Should().NotBeNull();
+            added!.Kind.Should().Be("Text");
+            added.Text.Should().Contain("Employee Name");
+            added.Bold.Should().BeTrue();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// setFont and setFontSize must also work on a newly added text object, not just setBold --
+    /// WithFont's null-FontColor guard would reject any of the three identically before the fix.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsTextThenSetsFontAndFontSizeInOnePlanAndBothSurviveSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddText, Section = sectionName, NewName = "VibeyStyledText",
+                    Text = "Styled", LeftTwips = 0, TopTwips = 0, WidthTwips = 2500, HeightTwips = 240
+                },
+                new LayoutOperation { Action = LayoutActions.SetFont, Target = "VibeyStyledText", FontName = "Calibri" },
+                new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "VibeyStyledText", FontSizePt = 14f }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                                   .SingleOrDefault(o => o.Name == "VibeyStyledText");
+            added.Should().NotBeNull();
+            added!.FontName.Should().Be("Calibri");
+            added.FontSizePt.Should().Be(14f);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// A hardcoded Arial default would silently mismatch a report whose other objects use a
+    /// different font, forcing the caller to issue a setFont every time just to compensate.
+    /// PMSV10_IndPerfOverview.rpt's PageHeaderSection1 already carries three Text objects
+    /// (Text27/28/29), all measured directly as Segoe UI, not Arial -- the one fixture/section
+    /// combination on hand that can actually distinguish "inherited the section's existing font"
+    /// from "defaulted to Arial" (every other fixture's candidate sections are Arial already,
+    /// which would let a hardcoded-Arial default pass this assertion by coincidence).
+    /// </summary>
+    [Fact]
+    public void Apply_AddedTextInheritsTheFontOfExistingObjectsInItsSection()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        var sectionName = "PageHeaderSection1";
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddText, Section = sectionName, NewName = "VibeyInheritedFontText",
+                    Text = "Inherited", LeftTwips = 0, TopTwips = 1000, WidthTwips = 2000, HeightTwips = 200
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                                   .SingleOrDefault(o => o.Name == "VibeyInheritedFontText");
+            added.Should().NotBeNull();
+            added!.FontName.Should().Be("Segoe UI",
+                because: "it should inherit the font already used by PageHeaderSection1's existing " +
+                         "Text objects rather than default to Arial");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
 }
