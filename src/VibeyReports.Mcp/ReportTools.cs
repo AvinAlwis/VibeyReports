@@ -43,15 +43,29 @@ public sealed class ReportTools
     [Description("""
         Apply a layout plan to a .rpt file and save the result as a NEW .rpt that opens in
         Crystal Reports XI R2. The plan is JSON: {"planVersion":1,"operations":[...]}.
-        Supported actions: move, resize, setFont, setFontSize, setBold, setAlignment,
-        addText, addLine, addBox, addField, resizeSection.
-        move/resize/setFont/setFontSize/setBold/setAlignment take "target" (an existing object
-        name). addText/addLine/addBox/resizeSection/addField take "section" (a section name);
-        addText/addLine/addBox/addField also take "newName" and full geometry (leftTwips,
-        topTwips, widthTwips, heightTwips).
-        addField places a bound database field. It takes "section", "newName", "fieldRef" and
-        full geometry. fieldRef MUST be one of the formulaForm values from the schema's
-        availableFields (from read_report) — it can only reference fields already in the
+        planJson is an opaque string, so this description is the only place the required
+        properties for each action are documented - the JSON schema alone cannot tell you them.
+        Every operation needs "action" plus:
+
+          move            target, leftTwips, topTwips
+          resize          target, widthTwips, heightTwips
+          setFont         target, fontName
+          setFontSize     target, fontSizePt (4-72)
+          setBold         target, bold
+          setAlignment    target, alignment (Left | Right | Centre | Justified; "Center" is
+                          also accepted)
+          addText         section, newName, text, leftTwips, topTwips, widthTwips, heightTwips
+          addLine         section, newName, leftTwips, topTwips, widthTwips, heightTwips
+                          (a line must be horizontal or vertical: set widthTwips or
+                          heightTwips to 0)
+          addBox          section, newName, leftTwips, topTwips, widthTwips, heightTwips
+          addField        section, newName, fieldRef, leftTwips, topTwips, widthTwips,
+                          heightTwips
+          resizeSection   section, heightTwips
+
+        "target" names an existing object (from read_report); "section" names an existing
+        section. addField's fieldRef MUST be one of the formulaForm values from the schema's
+        availableFields (from read_report) - it can only reference fields already in the
         report's data source, and cannot add tables or change any connection.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
@@ -60,6 +74,12 @@ public sealed class ReportTools
         Layout only: database connections, SQL, formulas, parameters, record selection and
         grouping cannot be changed and any attempt is rejected. The whole plan is validated
         before anything is written, so a rejected plan leaves no output file behind.
+        On success the result includes the refreshed schema, so you do not need a follow-up
+        read_report to see the new object names, positions or section heights.
+        To inspect the result, call preview_report on outputPath (the file just written), not on
+        the original reportPath - the source file is never modified, so previewing it will show
+        the report unchanged and look like your edit had no effect. To iterate further, either
+        pass outputPath as the next call's reportPath, or write each round to a fresh outputPath.
         """)]
     public async Task<string> ApplyLayout(
         [Description("Absolute path to the source .rpt file. Never modified.")] string reportPath,
@@ -99,12 +119,14 @@ public sealed class ReportTools
         Render the first page of a .rpt file and return it as an image so you can see the
         actual laid-out report. Use this after apply_layout to check for overlapping fields,
         uneven spacing, misaligned columns, oversized headings and inconsistent margins, then
-        issue a corrected layout plan.
+        issue a corrected layout plan. Pass apply_layout's outputPath here, not the original
+        reportPath - the source file is never modified, so previewing it instead would show the
+        report unchanged and look like your edit had no effect.
         """)]
     public async Task<CallToolResult> PreviewReport(
         [Description("Absolute path to the .rpt file to render.")] string reportPath,
-        [Description("Render resolution in DPI. 96 is usually enough; use 150 for fine detail.")] int dpi,
-        CancellationToken cancellationToken)
+        [Description("Render resolution in DPI, 72-300. Defaults to 96, which is usually enough; use up to 300 for fine detail. Out-of-range values are clamped.")] int dpi = 96,
+        CancellationToken cancellationToken = default)
     {
         var response = await _worker.RenderAsync(reportPath, cancellationToken);
 
@@ -117,10 +139,18 @@ public sealed class ReportTools
             };
         }
 
+        // round-1 fix F2: dpi was previously clamped only on the floor (dpi <= 0 -> 96), leaving it
+        // unbounded on the high side. A Letter page at a few hundred dpi is already tens of
+        // megabytes of bitmap, and PDFtoImage's own docs warn that an oversized render can produce
+        // "corrupted images (e.g. missing text)" rather than throwing - the worst possible failure
+        // mode for a tool whose entire purpose is letting the agent inspect layout, since it would
+        // silently "see" missing text and try to fix a problem that does not exist.
+        var effectiveDpi = Math.Clamp(dpi <= 0 ? 96 : dpi, 72, 300);
+
         byte[] png;
         try
         {
-            png = PdfRasterizer.FirstPageToPng(Convert.FromBase64String(response.PdfBase64), dpi <= 0 ? 96 : dpi);
+            png = PdfRasterizer.FirstPageToPng(Convert.FromBase64String(response.PdfBase64), effectiveDpi);
         }
         catch (Exception ex)
         {
@@ -135,7 +165,7 @@ public sealed class ReportTools
         {
             Content =
             [
-                new TextContentBlock { Text = $"Page 1 of {Path.GetFileName(reportPath)} at {(dpi <= 0 ? 96 : dpi)} dpi." },
+                new TextContentBlock { Text = $"Page 1 of {Path.GetFileName(reportPath)} at {effectiveDpi} dpi." },
                 ImageContentBlock.FromBytes(png, "image/png")
             ]
         };

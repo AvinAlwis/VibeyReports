@@ -19,6 +19,22 @@ public class ReportToolsTests
         schema.Sections.Should().NotBeEmpty();
     }
 
+    // round-1 fix T3: apply_layout's description now promises availableFields, and addField's
+    // fieldRef allowlist depends on it, but the only prior assertion was
+    // Sections.Should().NotBeEmpty(). SampleReport.rpt's fields weren't exercised here, so use
+    // PMSV10_IndPerfOverview.rpt, which has real bound database fields.
+    [Fact]
+    public async Task ReadReport_ReturnsAPopulatedAvailableFields()
+    {
+        var path = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+
+        var json = await Tools().ReadReport(path, CancellationToken.None);
+
+        var schema = JsonSerializer.Deserialize<ReportSchema>(json, VibeyJson.Options)!;
+        schema.AvailableFields.Should().NotBeEmpty();
+        schema.AvailableFields.Should().OnlyContain(f => !string.IsNullOrWhiteSpace(f.FormulaForm));
+    }
+
     [Fact]
     public async Task ReadReport_ReturnsAReadableErrorForAMissingFile()
     {
@@ -65,6 +81,19 @@ public class ReportToolsTests
         result.Should().Contain("\"ok\": false");
         result.Should().Contain("NotReal");
         File.Exists(dest).Should().BeFalse();
+
+        // round-1 fix T2: pin the *structure* of validationErrors, not just that "NotReal" appears
+        // somewhere in the payload. A regression that folded ValidationError.Message into "error"
+        // and dropped the validationErrors array (destroying the operationIndex/message retry
+        // signal the brief calls out) would still contain "NotReal" and keep the assertions above
+        // green.
+        using var doc = JsonDocument.Parse(result);
+        var errors = doc.RootElement.GetProperty("validationErrors");
+        errors.ValueKind.Should().Be(JsonValueKind.Array);
+        errors.GetArrayLength().Should().BeGreaterThan(0);
+        var firstError = errors[0];
+        firstError.GetProperty("operationIndex").GetInt32().Should().Be(0);
+        firstError.GetProperty("message").GetString().Should().Contain("NotReal");
     }
 
     [Fact]
