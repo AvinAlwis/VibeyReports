@@ -664,12 +664,17 @@ public class LayoutApplierTests
     // --- Task 6c: addText font defaulting ---
 
     /// <summary>
-    /// Regression test for the reported defect: a freshly constructed TextObjectClass comes back
-    /// from Add() with FontColor == null (mirrors the addField bug T4 fixed in round 1 -- see
-    /// AddField's comment), and WithFont's ISCRTextObject arm requires FontColor.Font to be
-    /// non-null. Before the fix, the SetBold operation below throws InvalidOperationException
-    /// ("has no font object.") because AddText never gave the new text a font. This is the
-    /// project's primary stated use case: four bold column headings over a details band.
+    /// Coverage that addText immediately followed by setBold on the same new object -- the
+    /// project's primary stated use case, four bold column headings over a details band -- works
+    /// end to end and survives save/reopen. NOT the regression test for a null-FontColor crash:
+    /// unlike AddField (whose FieldObjectClass really does come back from Add() with
+    /// FontColor == null, confirmed by reverting its fix and rerunning), a freshly constructed
+    /// TextObjectClass's outer FontColor is never null -- RAS supplies its own default
+    /// ("MS Shell Dlg"), so WithFont's null-FontColor guard is never hit here and this test passes
+    /// even against the pre-fix code (verified directly). Pre-fix, the actual defect on this path
+    /// was a silently wrong font, not a throw; see
+    /// Apply_AddedTextInheritsTheFontOfExistingObjectsInItsSection for the test that genuinely
+    /// fails before the fix, and task-6c-report.md for the full investigation.
     /// </summary>
     [Fact]
     public void Apply_AddsTextThenSetsBoldInOnePlanAndBothSurviveSaveAndReopen()
@@ -705,8 +710,13 @@ public class LayoutApplierTests
     }
 
     /// <summary>
-    /// setFont and setFontSize must also work on a newly added text object, not just setBold --
-    /// WithFont's null-FontColor guard would reject any of the three identically before the fix.
+    /// Coverage that setFont and setFontSize also work on a newly added text object, not just
+    /// setBold -- exercised together in one plan so a regression in either shows up here. As with
+    /// Apply_AddsTextThenSetsBoldInOnePlanAndBothSurviveSaveAndReopen above, this is not a
+    /// null-FontColor regression test: a freshly constructed TextObjectClass's outer FontColor is
+    /// never null (RAS defaults it to "MS Shell Dlg"), so this test passes even against the pre-fix
+    /// code (verified directly). See Apply_AddedTextInheritsTheFontOfExistingObjectsInItsSection
+    /// for the test that genuinely fails before the fix.
     /// </summary>
     [Fact]
     public void Apply_AddsTextThenSetsFontAndFontSizeInOnePlanAndBothSurviveSaveAndReopen()
