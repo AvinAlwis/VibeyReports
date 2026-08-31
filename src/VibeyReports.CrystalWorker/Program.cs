@@ -116,6 +116,11 @@ namespace VibeyReports.CrystalWorker
                         var response = WorkerResponse.Success();
                         response.OperationsApplied = applied;
                         response.OutputPath = Path.GetFullPath(request.OutputPath);
+                        // Final review F4: schema.ReportPath was ReportReader.Read's session.SourcePath
+                        // (the SOURCE .rpt), even though apply_layout's own description warns at length
+                        // against previewing/continuing from the source path instead of outputPath. Point
+                        // the returned schema at the file that was actually written.
+                        schema.ReportPath = response.OutputPath;
                         response.Schema = schema;
                         return response;
                     }

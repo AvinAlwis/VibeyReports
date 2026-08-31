@@ -1,5 +1,11 @@
 # Vibey Reports Implementation Plan
 
+> **This plan predates execution.** It was written before the Crystal Reports XI R2 RAS SDK had
+> been exercised on the target machine, and nine of its assumptions about that SDK's actual
+> behaviour turned out to be wrong once measured. **[docs/sdk-notes.md](../../sdk-notes.md) is
+> authoritative wherever the two disagree** — read it before relying on this plan's SDK-facing
+> code samples (object model shapes, method signatures, encoding behaviour).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let Claude redesign the visual layout of an existing Crystal Reports XI R2 `.rpt` file and save a new `.rpt` that opens correctly in Crystal Reports XI R2 and in the PeoplesHR software.

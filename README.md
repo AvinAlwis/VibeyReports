@@ -16,6 +16,13 @@ The `CrystalReports.*` 13.x NuGet packages will open XI R2 files but save them i
 format that XI R2 and PeoplesHR cannot open. They must not appear anywhere in this
 repository's dependencies.
 
+**Before changing anything in `VibeyReports.CrystalWorker`, read
+[docs/sdk-notes.md](docs/sdk-notes.md).** The RAS SDK's real behaviour diverges from the
+original implementation plan (`docs/superpowers/plans/2026-08-31-vibey-reports.md`) in nine
+measured ways — object model shapes, font types, encoding requirements, and more. The notes
+file is authoritative wherever it and the plan disagree; the full per-task detail lives in
+`docs/supplements/`.
+
 ## Build and publish
 
 ```powershell
@@ -126,8 +133,8 @@ dotnet test
 `VibeyReports.CrystalWorker.Tests` and `VibeyReports.Mcp.Tests` need Crystal Reports XI R2
 installed. `VibeyReports.Contracts.Tests` runs anywhere.
 
-As of Task 11: `VibeyReports.Contracts.Tests` 44, `VibeyReports.CrystalWorker.Tests` 55,
-`VibeyReports.Mcp.Tests` 22 — all passing (0 failed).
+As of the final review fix wave: `VibeyReports.Contracts.Tests` 45, `VibeyReports.CrystalWorker.Tests` 60,
+`VibeyReports.Mcp.Tests` 24 — all passing (0 failed).
 
 ## MVP verification
 

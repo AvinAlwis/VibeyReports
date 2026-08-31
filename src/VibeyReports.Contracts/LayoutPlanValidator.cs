@@ -12,8 +12,13 @@ public static class LayoutPlanValidator
     private static readonly HashSet<string> Alignments =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Left", "Right", "Centre", "Center", "Justified" };
 
+    // F3 (final review): FieldHeadingObjectClass implements ISCRTextObject and therefore does
+    // carry a font -- ReportReader already reports fontName/fontSizePt/bold for it, and
+    // LayoutApplier.WithFont's ISCRTextObject case already handles it. Only this allowlist was
+    // out of sync, wrongly refusing font changes on wizard-generated column headings (which
+    // Crystal places as FieldHeading objects) with a message claiming they have no font.
     private static readonly HashSet<string> FontableKinds =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field" };
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field", "FieldHeading" };
 
     public static ValidationResult Validate(LayoutPlan plan, ReportSchema schema)
     {

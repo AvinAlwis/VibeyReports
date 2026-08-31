@@ -8,6 +8,16 @@ using System.Text.Json;
 var bomless = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 Console.OutputEncoding = bomless;
 
+// Final review F6: reproduces "a worker that hangs BEFORE draining stdin" -- deliberately never
+// touches Console.In, so a client write larger than the OS pipe buffer blocks unless the write
+// itself is cancellable. Every other scenario below reads stdin first (matching the real worker),
+// which cannot exercise this path since the write always completes once something reads the pipe.
+if (Environment.GetEnvironmentVariable("VIBEY_FAKEWORKER_HANG_BEFORE_READ") == "1")
+{
+    await Task.Delay(TimeSpan.FromSeconds(30));
+    return 0;
+}
+
 string raw;
 using (var stdin = Console.OpenStandardInput())
 using (var reader = new StreamReader(stdin, bomless))

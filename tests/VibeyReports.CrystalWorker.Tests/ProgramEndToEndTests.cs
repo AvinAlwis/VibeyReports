@@ -117,6 +117,41 @@ public class ProgramEndToEndTests
         finally { if (File.Exists(dest)) File.Delete(dest); }
     }
 
+    /// <summary>
+    /// Final review F4: apply_layout's own tool description warns at length that previewing or
+    /// continuing from "reportPath" (the source, never modified) instead of "outputPath" makes an
+    /// edit look like it had no effect -- and then the response handed back a schema whose
+    /// ReportPath field WAS the source path, the exact trap the description warns against.
+    /// </summary>
+    [Fact]
+    public void Apply_ReturnsASchemaWhoseReportPathIsTheOutputFileNotTheSource()
+    {
+        var readResponse = Run(new WorkerRequest { Command = WorkerCommands.Read, ReportPath = Fixtures.SampleReport });
+        var firstObject = readResponse.Schema!.Sections
+            .SelectMany(s => s.Objects)
+            .First(o => o.Kind == "Text" || o.Kind == "Field");
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var response = Run(new WorkerRequest
+            {
+                Command = WorkerCommands.Apply,
+                ReportPath = Fixtures.SampleReport,
+                OutputPath = dest,
+                Plan = new LayoutPlan
+                {
+                    Operations = { new LayoutOperation { Action = LayoutActions.SetBold, Target = firstObject.Name, Bold = true } }
+                }
+            });
+
+            response.Ok.Should().BeTrue(because: response.Error);
+            response.Schema!.ReportPath.Should().Be(response.OutputPath);
+            response.Schema.ReportPath.Should().NotBe(Path.GetFullPath(Fixtures.SampleReport));
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
     [Fact]
     public void Apply_WithAnInvalidPlan_ReturnsOkFalseAndValidationErrorsWithoutCrashing()
     {

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using FluentAssertions;
+using VibeyReports.Contracts;
 using VibeyReports.Mcp;
 using Xunit;
 
@@ -80,5 +81,56 @@ public class InvokeAsyncErrorPathTests
 
         response.Ok.Should().BeFalse();
         response.Error.Should().Contain("Exit code 3");
+    }
+
+    /// <summary>
+    /// Final review F6: previously, await process.StandardInput.WriteAsync(...) was not passed the
+    /// cancellation token, so a worker that hangs BEFORE draining stdin could block that write
+    /// forever on a payload larger than the pipe's buffer -- the timeout only ever applied to
+    /// WaitForExitAsync afterwards, which the write never reached. VibeyReports.FakeWorker's
+    /// VIBEY_FAKEWORKER_HANG_BEFORE_READ mode never reads stdin at all, and reportPath here is
+    /// padded well past any realistic OS pipe buffer size to force the write to actually block
+    /// absent the fix.
+    /// </summary>
+    [Fact]
+    public async Task InvokeAsync_TimesOutRatherThanHangingWhenTheWorkerNeverDrainsStdinOnALargeRequest()
+    {
+        var client = new CrystalWorkerClient(FakeWorkerPath, timeout: TimeSpan.FromSeconds(2));
+        var hugeReportPath = @"C:\reports\" + new string('x', 8 * 1024 * 1024) + ".rpt";
+
+        Environment.SetEnvironmentVariable("VIBEY_FAKEWORKER_HANG_BEFORE_READ", "1");
+        Task<WorkerResponse> responseTask;
+        try
+        {
+            responseTask = client.ReadAsync(hugeReportPath, CancellationToken.None);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VIBEY_FAKEWORKER_HANG_BEFORE_READ", null);
+        }
+
+        var response = await responseTask.WaitAsync(TimeSpan.FromSeconds(15));
+
+        response.Ok.Should().BeFalse();
+        response.Error.Should().ContainEquivalentOf("did not finish");
+    }
+
+    /// <summary>
+    /// Final review F6: Process.Start throws (rather than returning null) when the target
+    /// executable does not exist - the same failure mode as the worker being deleted or blocked
+    /// after WorkerLocator's own startup probe succeeded. Before the fix, this propagated as a raw
+    /// Win32Exception with no catch-all in ReportTools to turn it into the {"ok":false,...} shape
+    /// every tool description promises.
+    /// </summary>
+    [Fact]
+    public async Task InvokeAsync_ReturnsOkFalseRatherThanThrowingWhenTheWorkerExecutableDoesNotExist()
+    {
+        var missingPath = Path.Combine(Path.GetTempPath(), $"vibey_missing_{Guid.NewGuid():N}.exe");
+        var client = new CrystalWorkerClient(missingPath);
+
+        var response = await client.ReadAsync(@"C:\reports\whatever.rpt", CancellationToken.None);
+
+        response.Ok.Should().BeFalse();
+        response.Error.Should().NotBeNullOrWhiteSpace();
     }
 }

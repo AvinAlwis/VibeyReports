@@ -27,7 +27,11 @@ public class LayoutPlanValidatorTests
                     // Kind = "Line": what ReportReader emits for a Crystal line, and what addLine creates. Used by F1/T4.
                     new ObjectInfo { Name = "HeaderRule", Kind = "Line", LeftTwips = 0, TopTwips = 350, WidthTwips = 3000, HeightTwips = 0 },
                     // Already overflowing the printable width (12240 - 720 - 720 = 10800; right edge = 9000 + 3000 = 12000). Used by F4/T1/T8.
-                    new ObjectInfo { Name = "Wide", Kind = "Text", LeftTwips = 9000, TopTwips = 500, WidthTwips = 3000, HeightTwips = 100 }
+                    new ObjectInfo { Name = "Wide", Kind = "Text", LeftTwips = 9000, TopTwips = 500, WidthTwips = 3000, HeightTwips = 100 },
+                    // Kind = "FieldHeading": what ReportReader emits for a wizard-generated column
+                    // heading. FieldHeadingObjectClass implements ISCRTextObject and genuinely
+                    // carries a font (final review F3).
+                    new ObjectInfo { Name = "StageNameHeading", Kind = "FieldHeading", LeftTwips = 0, TopTwips = 100, WidthTwips = 2000, HeightTwips = 240 }
                 }
             },
             new SectionInfo
@@ -325,6 +329,23 @@ public class LayoutPlanValidatorTests
     public void Validate_AcceptsSetBoldOnATextObject()
     {
         var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetBold, Target = "Title", Bold = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    // Final review F3: FontableKinds previously omitted "FieldHeading", the kind ReportReader
+    // emits for a wizard-generated column heading (FieldHeadingObjectClass implements
+    // ISCRTextObject and genuinely carries a font), so setFont/setFontSize/setBold on a column
+    // heading was wrongly rejected with a message claiming it "has no font to change."
+    [Fact]
+    public void Validate_AcceptsFontOperationsOnAFieldHeadingObject()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.SetBold, Target = "StageNameHeading", Bold = true },
+            new LayoutOperation { Action = LayoutActions.SetFont, Target = "StageNameHeading", FontName = "Arial" },
+            new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "StageNameHeading", FontSizePt = 10f });
 
         var result = LayoutPlanValidator.Validate(plan, Schema());
 

@@ -82,10 +82,33 @@ namespace VibeyReports.CrystalWorker
 
             var dir = Path.GetDirectoryName(full);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            if (File.Exists(full)) File.Delete(full);
 
-            // SaveAs(name, directory, options). 0 = crReportOptionDefault.
-            Document.SaveAs(Path.GetFileName(full), dir, 0);
+            // F5 (final review): save to a temporary name in the same directory first, and only
+            // move it over the real destination once the COM save has actually succeeded. The
+            // previous implementation deleted an existing destination BEFORE calling
+            // Document.SaveAs, so a save that failed partway through (a locked file, a disk error,
+            // Crystal itself throwing) left the caller with ok:false while the previous good output
+            // had already been destroyed -- the one hole in "ok:false implies nothing was written",
+            // and the documented iterate-in-place workflow (write each round back to the same
+            // outputPath with overwrite:true) makes hitting it a normal occurrence, not an edge
+            // case. Both guards above (never the source; refuse an existing destination unless
+            // overwrite:true) still run first and are unchanged.
+            var tempName = $".vibey-tmp-{Guid.NewGuid():N}{Path.GetExtension(full)}";
+            var tempFull = Path.Combine(dir, tempName);
+
+            try
+            {
+                // SaveAs(name, directory, options). 0 = crReportOptionDefault.
+                Document.SaveAs(tempName, dir, 0);
+
+                if (File.Exists(full)) File.Delete(full);
+                File.Move(tempFull, full);
+            }
+            catch
+            {
+                if (File.Exists(tempFull)) File.Delete(tempFull);
+                throw;
+            }
         }
 
         public void Dispose()

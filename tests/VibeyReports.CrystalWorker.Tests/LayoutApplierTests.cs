@@ -141,6 +141,35 @@ public class LayoutApplierTests
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
 
+    /// <summary>
+    /// Final review F3: LayoutPlanValidator.FontableKinds omitted "FieldHeading" even though
+    /// FieldHeadingObjectClass implements ISCRTextObject and genuinely carries a font --
+    /// SampleReport.rpt measurably has two such objects (Text1, Text2; confirmed by a temporary
+    /// diagnostic walking ReportReader.Read's Kind values before writing this test), so this is a
+    /// real end-to-end regression test, not one that can only pass by coincidence.
+    /// </summary>
+    [Fact]
+    public void Apply_SetsBoldOnAFieldHeadingObjectAndItSurvivesSaveAndReopen()
+    {
+        string name;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            name = ReportReader.Read(s).Sections.SelectMany(x => x.Objects).First(o => o.Kind == "FieldHeading").Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.SetBold, Target = name, Bold = true } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var styled = schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == name);
+            styled.Kind.Should().Be("FieldHeading");
+            styled.Bold.Should().BeTrue();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
     [Fact]
     public void Apply_SetsHorizontalAlignment()
     {
