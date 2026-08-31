@@ -30,7 +30,18 @@ namespace VibeyReports.CrystalWorker
             WorkerResponse response;
             try
             {
-                var raw = Console.In.ReadToEnd();
+                // round-1 fix F1: Console.In.ReadToEnd() decodes using Console.InputEncoding, which
+                // defaults to the OEM/ANSI code page on Windows - a different encoding from the
+                // BOM-less UTF-8 the client writes and this process writes back out on stdout. Rather
+                // than assigning Console.InputEncoding (which can throw when stdin is redirected, e.g.
+                // "The handle is invalid"), read the raw stdin stream directly and decode it with the
+                // same BOM-less UTF-8 used everywhere else in this protocol.
+                string raw;
+                using (var stdin = Console.OpenStandardInput())
+                using (var reader = new StreamReader(stdin, bomless))
+                {
+                    raw = reader.ReadToEnd();
+                }
                 var request = JsonSerializer.Deserialize<WorkerRequest>(raw, VibeyJson.Options);
                 if (request == null) throw new InvalidOperationException("Empty request.");
 

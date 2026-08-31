@@ -45,6 +45,12 @@ public sealed class CrystalWorkerClient
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
+            // round-1 fix F1: StandardInputEncoding was previously left unset, which falls back to
+            // Console.InputEncoding (typically the OEM/ANSI code page on Windows) - a different
+            // encoding from the BOM-less UTF-8 used for output and by the worker on the way back.
+            // Non-ASCII report paths or field names would go in corrupted. Match the worker's
+            // BOM-less UTF-8 exactly on all three redirected streams.
+            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
             WorkingDirectory = Path.GetDirectoryName(_workerPath)!

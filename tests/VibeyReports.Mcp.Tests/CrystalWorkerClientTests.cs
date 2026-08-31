@@ -89,4 +89,25 @@ public class CrystalWorkerClientTests
         var bytes = Convert.FromBase64String(response.PdfBase64!);
         Encoding.ASCII.GetString(bytes, 0, 5).Should().Be("%PDF-");
     }
+
+    // round-1 fix F1: stdin between the client and worker was not pinned to UTF-8 (it fell back to
+    // Console.InputEncoding, typically the OEM/ANSI code page on Windows), while stdout/stderr were.
+    // A non-ASCII report path is the failing scenario the finding calls out by name - café.rpt, or a
+    // field name with an accent or a non-Latin character - and is realistic for an HR product
+    // deployed across the Philippines and Sri Lanka.
+    [Fact]
+    public async Task ReadAsync_RoundTripsANonAsciiReportPath()
+    {
+        var nonAsciiName = "vibey_café_niño_" + Guid.NewGuid().ToString("N") + ".rpt";
+        var dest = Path.Combine(Path.GetTempPath(), nonAsciiName);
+        File.Copy(Fixtures.SampleReport, dest, overwrite: true);
+        try
+        {
+            var response = await Client().ReadAsync(dest, CancellationToken.None);
+
+            response.Ok.Should().BeTrue(because: response.Error);
+            response.Schema!.ReportPath.Should().Contain("café_niño");
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
 }

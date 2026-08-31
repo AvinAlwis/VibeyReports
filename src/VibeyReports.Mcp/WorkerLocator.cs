@@ -22,13 +22,26 @@ public static class WorkerLocator
             return Path.GetFullPath(overridden);
         }
 
-        var sideBySide = Path.Combine(AppContext.BaseDirectory, ExeName);
+        return Find(AppContext.BaseDirectory);
+    }
+
+    /// <summary>
+    /// The base-directory-relative probes only (side-by-side, then worker/ subdirectory, then the
+    /// dev-mode walk-up). Split out from <see cref="Find()"/> — which additionally honours
+    /// VIBEY_WORKER_PATH — round-1 fix T1: so tests can drive the worker/ subdirectory probe with a
+    /// synthetic base directory, isolating it from both the environment-variable override and
+    /// whatever the walk-up would otherwise find from the real AppContext.BaseDirectory.
+    /// Internal, exposed to VibeyReports.Mcp.Tests via InternalsVisibleTo.
+    /// </summary>
+    internal static string Find(string baseDirectory)
+    {
+        var sideBySide = Path.Combine(baseDirectory, ExeName);
         if (File.Exists(sideBySide)) return sideBySide;
 
-        var published = Path.Combine(AppContext.BaseDirectory, "worker", ExeName);
+        var published = Path.Combine(baseDirectory, "worker", ExeName);
         if (File.Exists(published)) return published;
 
-        var dir = AppContext.BaseDirectory;
+        var dir = baseDirectory;
         for (var i = 0; i < 8 && dir is not null; i++)
         {
             var candidate = Directory.GetDirectories(dir, "VibeyReports.CrystalWorker", SearchOption.TopDirectoryOnly)

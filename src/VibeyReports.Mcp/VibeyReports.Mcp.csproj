@@ -14,4 +14,9 @@
   <ItemGroup>
     <ProjectReference Include="..\VibeyReports.Contracts\VibeyReports.Contracts.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- round-1 fix T1: lets the test project drive WorkerLocator's internal Find(baseDirectory)
+         overload directly, isolating the worker/ subdirectory probe from the dev-mode walk-up. -->
+    <InternalsVisibleTo Include="VibeyReports.Mcp.Tests" />
+  </ItemGroup>
 </Project>
