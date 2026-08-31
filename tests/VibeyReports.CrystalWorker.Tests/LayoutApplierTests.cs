@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CrystalDecisions.ReportAppServer.ReportDefModel;
@@ -16,8 +17,9 @@ public class LayoutApplierTests
     /// <summary>
     /// Applies a plan, saves, reopens, and hands back the resulting schema. T3: also asserts the
     /// source .rpt was never touched -- "the source must never be modified" is a global constraint,
-    /// and every test in this file mutates a session opened directly on Fixtures.SampleReport, so
-    /// checking it here covers all of them for free.
+    /// and every test in this file that goes through this helper mutates a session opened directly
+    /// on one of the fixtures under tests/fixtures (Fixtures.SampleReport by default, or another
+    /// fixture passed via sourcePath), so checking it here covers all of them for free.
     /// </summary>
     private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath, string sourcePath = null)
     {
@@ -502,7 +504,9 @@ public class LayoutApplierTests
                 {
                     Action = LayoutActions.AddField, Section = sectionName, NewName = "VibeyField",
                     FieldRef = fieldRef,
-                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2500, HeightTwips = 240
+                    // Round-1 fix (T4): non-zero Left/Top, asserted below -- at 0,0 the position
+                    // assertion could not distinguish "positioned as requested" from "RAS defaulted".
+                    LeftTwips = 200, TopTwips = 40, WidthTwips = 2500, HeightTwips = 240
                 }
             }
         };
@@ -515,7 +519,144 @@ public class LayoutApplierTests
             added.Should().NotBeNull();
             added!.Kind.Should().Be("Field");
             added.DataSource.Should().Be(fieldRef);
+            added.LeftTwips.Should().Be(200);
+            added.TopTwips.Should().Be(40);
             added.WidthTwips.Should().Be(2500);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Round-1 fix (T1), the priority test: the security boundary is otherwise only proven at the
+    /// validator level, against hand-rolled schemas. Nothing previously asserted that
+    /// LayoutApplier.Apply itself rejects a bogus fieldRef against a real, live report and leaves
+    /// the document unmutated -- a refactor that reordered Apply to mutate before validating, or
+    /// that passed a stale schema to Validate, would have kept all 40 Contracts tests green.
+    /// </summary>
+    [Fact]
+    public void Apply_RejectsAFieldRefThatIsNotInTheReportsDataSource()
+    {
+        using var session = CrystalSession.Open(Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt"));
+        var before = ReportReader.Read(session);
+        var sectionName = before.Sections.First(s => s.Kind == "Details").Name;
+        var countBefore = before.Sections.SelectMany(s => s.Objects).Count();
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddField, Section = sectionName, NewName = "fBogus",
+                    FieldRef = "{Command.salary_secret_not_in_this_report}",
+                    LeftTwips = 100, TopTwips = 20, WidthTwips = 2000, HeightTwips = 240
+                }
+            }
+        };
+
+        Action act = () => LayoutApplier.Apply(session, plan);
+
+        act.Should().Throw<LayoutApplier.InvalidPlanException>();
+        session.IsFaulted.Should().BeFalse(because: "validation runs before any mutation");
+        ReportReader.Read(session).Sections.SelectMany(s => s.Objects).Count().Should().Be(countBefore);
+    }
+
+    /// <summary>
+    /// Round-1 fix (T3): the entire deviation from the brief was about resolving each field's real
+    /// CrFieldValueTypeEnum before binding it (see AddField's F1 fix), yet the persistence test above
+    /// only ever exercised AvailableFields.First(). This walks every distinct ValueType the fixture's
+    /// AvailableFields reports (String/Number/Date/Currency/Boolean/... whichever this fixture has),
+    /// adds one field of each, and asserts every DataSource round-trips. The value type itself is not
+    /// asserted -- ObjectInfo does not expose it -- proving Add does not throw and the binding
+    /// persists across several distinct types is the valuable part.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsFieldsOfMultipleDistinctValueTypesAndEachDataSourceRoundTrips()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        List<FieldInfo> distinctByType;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 2000).Name;
+            distinctByType = schema.AvailableFields
+                .GroupBy(f => f.ValueType)
+                .Select(g => g.First())
+                .ToList();
+        }
+
+        distinctByType.Count.Should().BeGreaterThanOrEqualTo(2,
+            because: "the fixture must expose more than one field ValueType for this test to be meaningful");
+
+        var plan = new LayoutPlan { Operations = new List<LayoutOperation>() };
+        var top = 0;
+        foreach (var (field, i) in distinctByType.Select((f, i) => (f, i)))
+        {
+            plan.Operations.Add(new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = sectionName, NewName = $"VibeyTypeField{i}",
+                FieldRef = field.FormulaForm,
+                LeftTwips = 0, TopTwips = top, WidthTwips = 2500, HeightTwips = 240
+            });
+            top += 260;
+        }
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var objects = schemaAfter.Sections.SelectMany(s => s.Objects).ToList();
+            for (var i = 0; i < distinctByType.Count; i++)
+            {
+                var added = objects.SingleOrDefault(o => o.Name == $"VibeyTypeField{i}");
+                added.Should().NotBeNull(because: $"field of ValueType \"{distinctByType[i].ValueType}\" should have been added");
+                added!.DataSource.Should().Be(distinctByType[i].FormulaForm);
+            }
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Round-1 fix (T4): the validator test proves a Kind="Field" sim-object is fontable, but
+    /// nothing previously proved FindObject can locate a newly-added field by newName on a real
+    /// document, or that WithFont's ISCRFieldObject arm works on a field addField itself created
+    /// (as opposed to one already present on the fixture).
+    /// </summary>
+    [Fact]
+    public void Apply_AddsAFieldThenSetsBoldInOnePlanAndBothSurviveSaveAndReopen()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string fieldRef;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 260).Name;
+            fieldRef = schema.AvailableFields.First().FormulaForm;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddField, Section = sectionName, NewName = "VibeyBoldField",
+                    FieldRef = fieldRef,
+                    LeftTwips = 100, TopTwips = 60, WidthTwips = 2500, HeightTwips = 240
+                },
+                new LayoutOperation { Action = LayoutActions.SetBold, Target = "VibeyBoldField", Bold = true }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                                   .SingleOrDefault(o => o.Name == "VibeyBoldField");
+            added.Should().NotBeNull();
+            added!.Kind.Should().Be("Field");
+            added.Bold.Should().BeTrue();
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }

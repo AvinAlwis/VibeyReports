@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -318,14 +317,28 @@ namespace VibeyReports.CrystalWorker
         }
 
         /// <summary>
-        /// Primary path: construct an ISCRFieldObject directly and bind it via DataSource, the
-        /// same "construct then Add(obj, section, -1)" idiom AddText/AddLine/AddBox use.
-        /// Measured on this machine: RAS can reject this with COMException "The field value type
-        /// is not valid." -- a bare DataSource string apparently lacks the field-kind/value-type
-        /// metadata RAS normally derives from the database field object itself. When that happens,
-        /// fall back to ReportObjectController.AddByName, which goes through RAS's own field
-        /// resolution instead of a hand-built FieldObjectClass. See task-6b-report.md for which
-        /// path fired on which fixture.
+        /// Construct an ISCRFieldObject directly and bind it via DataSource, the same
+        /// "construct then Add(obj, section, -1)" idiom AddText/AddLine/AddBox use.
+        ///
+        /// Round-1 fix history (task-6b-findings-round1.md F1/F2/F3), kept here because it is the
+        /// reason this method has no fallback:
+        /// - F1: a bare DataSource string alone is not enough -- ISCRFieldObject.FieldValueType
+        ///   defaults to a value RAS rejects with COMException "The field value type is not
+        ///   valid.". The type must be resolved from the matching ISCRDBField up front, and if it
+        ///   cannot be resolved that is thrown immediately and precisely, before ever touching
+        ///   RAS, rather than surfacing as a confusing downstream failure.
+        /// - F2: an AddByName fallback was tried and removed. Reflection confirms
+        ///   ISCRReportObjectController's entire surface is Add, Remove, Modify,
+        ///   GetAllReportObjects, GetReportObjectsByKind, AddByName, ImportPicture -- there is no
+        ///   Rename/SetName method anywhere, so a field AddByName creates can never be retitled to
+        ///   op.NewName. AddByName also creates a second (FieldHeading) object RAS positions on
+        ///   its own, and there is no way to give it a name safely. It is not a fallback; it is a
+        ///   longer, lossier way to fail after already mutating the live document. If Add throws
+        ///   here, that COMException is the real, actionable diagnostic and is propagated with
+        ///   full context instead.
+        /// - F3: the validator matches fieldRef case-insensitively, but the bound DataSource must
+        ///   be the report's own canonical FormulaForm, not the caller's string, or a case-variant
+        ///   fieldRef can bind to a DataSource RAS accepts but cannot resolve, rendering blank.
         /// </summary>
         private static void AddField(
             ISCDReportClientDocument doc,
@@ -333,41 +346,49 @@ namespace VibeyReports.CrystalWorker
         {
             var section = FindSection(doc, op.Section);
 
+            var dbField = ResolveDbField(doc, op.FieldRef);
+            if (dbField == null)
+                throw new InvalidOperationException(
+                    $"Could not resolve a field value type for \"{op.FieldRef}\" in section \"{op.Section}\". " +
+                    "The field passed validation against the report's available fields but was not found in the " +
+                    "live database tables, so it cannot be bound.");
+
             var field = new FieldObjectClass
             {
                 Name = op.NewName,
-                DataSource = op.FieldRef,
+                DataSource = dbField.FormulaForm,
+                FieldValueType = dbField.Type,
                 Left = op.LeftTwips.Value,
                 Top = op.TopTwips.Value,
                 Width = op.WidthTwips.Value,
-                Height = op.HeightTwips.Value
+                Height = op.HeightTwips.Value,
+                // Measured (post-round-1, discovered by T4): a freshly constructed FieldObjectClass
+                // comes back from Add() with FontColor == null, unlike a field already present in an
+                // .rpt. WithFont's ISCRFieldObject arm requires FontColor.Font to be non-null, so any
+                // setFont/setFontSize/setBold on a field addField itself just created would otherwise
+                // fail with "has no font object." Give it a concrete default so it starts fontable,
+                // matching the state every pre-existing field object is already in.
+                FontColor = new FontColorClass { Font = new FontClass { Name = "Arial", Size = 10m } }
             };
-
-            // Measured: a bare DataSource string alone gets "The field value type is not valid."
-            // from RAS -- ISCRFieldObject.FieldValueType defaults to a value RAS won't accept, and
-            // it must be set to match the actual database field's type, resolved via the same
-            // table walk ReportReader.Read uses for AvailableFields.
-            var dbFieldType = ResolveFieldValueType(doc, op.FieldRef);
-            if (dbFieldType.HasValue) field.FieldValueType = dbFieldType.Value;
 
             try
             {
                 doc.ReportDefController.ReportObjectController.Add(field, section, -1);
-                return;
             }
-            catch (COMException)
+            catch (COMException ex)
             {
-                // Fall through to the AddByName fallback below.
+                throw new InvalidOperationException(
+                    $"Crystal rejected the field \"{op.FieldRef}\" added to section \"{op.Section}\" " +
+                    $"as \"{op.NewName}\": {ex.Message.Trim()}", ex);
             }
-
-            AddFieldByName(doc, op);
         }
 
         /// <summary>
-        /// Same table walk ReportReader.Read uses for AvailableFields, but returning the raw
-        /// CrFieldValueTypeEnum instead of the already-classified string.
+        /// Same table walk ReportReader.Read uses for AvailableFields, returning the matching
+        /// ISCRDBField itself so the caller can read both its value type (F1) and its canonical
+        /// FormulaForm (F3) rather than trusting the caller's possibly case-variant string.
         /// </summary>
-        private static CrFieldValueTypeEnum? ResolveFieldValueType(ISCDReportClientDocument doc, string fieldRef)
+        private static ISCRDBField ResolveDbField(ISCDReportClientDocument doc, string fieldRef)
         {
             var tables = doc.DatabaseController.Database.Tables;
             for (var t = 0; t < tables.Count; t++)
@@ -377,80 +398,10 @@ namespace VibeyReports.CrystalWorker
                 {
                     var dbField = (ISCRDBField)fields[f];
                     if (string.Equals(dbField.FormulaForm, fieldRef, StringComparison.OrdinalIgnoreCase))
-                        return dbField.Type;
+                        return dbField;
                 }
             }
             return null;
-        }
-
-        /// <summary>
-        /// Fallback documented in task-6b-brief.md. AddByName resolves the field itself (it picks
-        /// its own section and position, which is why it is not the primary path -- it cannot
-        /// satisfy a positioned layout plan on its own), so after calling it we locate the object
-        /// it created via GetAllReportObjects() and apply the plan's requested name/position with
-        /// the existing ModifyObject helper.
-        /// </summary>
-        private static void AddFieldByName(ISCDReportClientDocument doc, LayoutOperation op)
-        {
-            var controller = doc.ReportDefController.ReportObjectController;
-
-            var beforeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var before = controller.GetAllReportObjects();
-            for (var i = 0; i < before.Count; i++)
-                beforeNames.Add(((ISCRReportObject)before[i]).Name);
-
-            // Measured: AddByName rejects ISCRDBField.Name ("Database Field Not Found") but
-            // accepts the FormulaForm expression itself, e.g. "{Table.Field}".
-            controller.AddByName(op.FieldRef, op.NewName);
-
-            var after = controller.GetAllReportObjects();
-            ISCRReportObject created = null;
-            for (var i = 0; i < after.Count; i++)
-            {
-                var ro = (ISCRReportObject)after[i];
-                if (ro is ISCRFieldObject && !beforeNames.Contains(ro.Name))
-                {
-                    created = ro;
-                    break;
-                }
-            }
-
-            if (created == null)
-                throw new InvalidOperationException("AddByName fallback did not create a new field object.");
-
-            var createdName = created.Name;
-            try
-            {
-                ModifyObject(doc, createdName, o =>
-                {
-                    o.Name = op.NewName;
-                    o.Left = op.LeftTwips.Value;
-                    o.Top = op.TopTwips.Value;
-                    o.Width = op.WidthTwips.Value;
-                    o.Height = op.HeightTwips.Value;
-                });
-            }
-            catch (COMException)
-            {
-                // Measured: RAS refuses to rename a report object via Modify() ("Cannot change
-                // report object name.") -- there is no Rename/SetName elsewhere on
-                // ISCRReportObjectController either (reflected directly: Add, Remove, Modify,
-                // GetAllReportObjects, GetReportObjectsByKind, AddByName, ImportPicture). Still
-                // apply the requested position under the RAS-assigned name, then surface the
-                // mismatch explicitly instead of silently leaving an object that later operations
-                // targeting op.NewName could never find.
-                ModifyObject(doc, createdName, o =>
-                {
-                    o.Left = op.LeftTwips.Value;
-                    o.Top = op.TopTwips.Value;
-                    o.Width = op.WidthTwips.Value;
-                    o.Height = op.HeightTwips.Value;
-                });
-                throw new InvalidOperationException(
-                    $"AddByName fallback created field \"{createdName}\" but RAS does not allow " +
-                    $"renaming it to \"{op.NewName}\"; it was positioned in place under its " +
-                    "original name instead.");
-            }
         }
 
         private static void ResizeSection(

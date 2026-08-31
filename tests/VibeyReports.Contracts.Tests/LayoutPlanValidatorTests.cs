@@ -568,6 +568,32 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeFalse();
         result.Errors[0].Message.Should().Contain("already exists");
     }
+
+    /// <summary>
+    /// Round-1 fix (T2): fail closed on an empty allowlist. ReportReader's read-time catch clears
+    /// AvailableFields to empty when a report's data source needs a logon it can't complete --
+    /// exactly the state a regression that treated "no entries configured, so unknown, so allow"
+    /// would need to slip past, since every other addField test in this file uses a populated list
+    /// with a non-matching entry rather than an empty one.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsAddFieldWhenAvailableFieldsIsEmpty()
+    {
+        var schema = Schema();
+        schema.AvailableFields.Clear();
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "fStageName",
+            FieldRef = "{Command.stage_name}",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("not a field in this report");
+    }
 }
 
 internal static class PlanExtensions
