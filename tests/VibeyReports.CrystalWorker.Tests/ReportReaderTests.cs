@@ -23,6 +23,34 @@ public class ReportReaderTests
     }
 
     [Fact]
+    public void Read_ReturnsFullPaperSizeNotPrintableArea()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var schema = ReportReader.Read(session);
+        var page = schema.Page;
+
+        // The validator does: printable = Width - MarginLeft - MarginRight.
+        // So Width must be the FULL paper size, strictly larger than the printable area
+        // whenever margins are non-zero.
+        (page.MarginLeftTwips + page.MarginRightTwips).Should().BeGreaterThan(0,
+            because: "this fixture has non-zero margins, which is what makes the check meaningful");
+
+        var printableWidth = page.WidthTwips - page.MarginLeftTwips - page.MarginRightTwips;
+        var printableHeight = page.HeightTwips - page.MarginTopTwips - page.MarginBottomTwips;
+
+        printableWidth.Should().BeGreaterThan(0);
+        printableHeight.Should().BeGreaterThan(0);
+
+        // A4 portrait is 11906 x 16838 twips; Letter is 12240 x 15840. Either way the full
+        // paper width of a real report is at least 11900 twips, and the printable area is
+        // strictly smaller than the paper.
+        page.WidthTwips.Should().BeGreaterThan(printableWidth);
+        page.HeightTwips.Should().BeGreaterThan(printableHeight);
+        page.WidthTwips.Should().BeGreaterThanOrEqualTo(11900);
+    }
+
+    [Fact]
     public void Read_ReturnsSectionsWithStableNamesAndHeights()
     {
         using var session = CrystalSession.Open(Fixtures.SampleReport);
@@ -44,6 +72,36 @@ public class ReportReaderTests
 
         var known = new[] { "ReportHeader", "PageHeader", "GroupHeader", "Details", "GroupFooter", "ReportFooter", "PageFooter", "Other" };
         schema.Sections.Should().OnlyContain(s => known.Contains(s.Kind));
+    }
+
+    [Fact]
+    public void Read_ClassifiesBandsFromAreaKindNotSectionName()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var schema = ReportReader.Read(session);
+        var bands = schema.Sections.Select(s => s.Kind).ToList();
+
+        // Measured shape of this fixture: five areas, one section each.
+        bands.Should().Contain("ReportHeader");
+        bands.Should().Contain("PageHeader");
+        bands.Should().Contain("Details");
+        bands.Should().Contain("PageFooter");
+        bands.Should().Contain("ReportFooter");
+
+        // A name-based heuristic returns "Other" for every section on fixtures whose sections
+        // are RAS-default-named "Section1", "Section2"... with no band encoded. Pin that
+        // classification doesn't fall back to that for this fixture.
+        //
+        // NOTE: this fixture's sections are actually named "ReportHeaderSection1",
+        // "PageHeaderSection1", "DetailSection1", "PageFooterSection1", "ReportFooterSection1"
+        // (measured directly) - the band name IS embedded in section.Name here, contradicting
+        // the "Section1, Section2... no band encoded" assumption carried over from Task 4's
+        // notes for a different fixture. A name-based heuristic would happen to work on THIS
+        // fixture by coincidence. That does not make Kind-from-Area.Kind wrong; it just means
+        // this particular fixture cannot be used to prove a name-based classifier is absent.
+        // The NotContain("Other") check above remains the meaningful guard.
+        bands.Should().NotContain("Other");
     }
 
     [Fact]

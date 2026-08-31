@@ -15,16 +15,25 @@ namespace VibeyReports.CrystalWorker
             var schema = new ReportSchema { ReportPath = session.SourcePath };
 
             var printOptions = doc.PrintOutputController.GetPrintOptions();
+            var margins = printOptions.PageMargins;
             schema.Page = new PageInfo
             {
-                WidthTwips = printOptions.PageContentWidth,
-                HeightTwips = printOptions.PageContentHeight,
+                // FIX (round 1, F1): PageContentWidth/Height are the PRINTABLE area (margins
+                // already removed), NOT the full paper size — the brief's original code assigned
+                // them straight to WidthTwips/HeightTwips, which double-subtracts margins because
+                // LayoutPlanValidator (Task 3) computes printable = Width - MarginLeft - MarginRight
+                // itself. ISCRPrintOptions exposes no direct paper-size-in-twips property (only a
+                // PaperSize enum, which can't express custom sizes), so reconstruct the full paper
+                // size by adding the margins back. Read margins once and reuse below so the two
+                // cannot drift.
+                WidthTwips = printOptions.PageContentWidth + margins.Left + margins.Right,
+                HeightTwips = printOptions.PageContentHeight + margins.Top + margins.Bottom,
                 // VERIFIED: ISCRPageMargins exposes Left/Right/Top/Bottom, not the
                 // leftMargin/rightMargin/topMargin/bottomMargin field names the brief assumed.
-                MarginLeftTwips = printOptions.PageMargins.Left,
-                MarginRightTwips = printOptions.PageMargins.Right,
-                MarginTopTwips = printOptions.PageMargins.Top,
-                MarginBottomTwips = printOptions.PageMargins.Bottom,
+                MarginLeftTwips = margins.Left,
+                MarginRightTwips = margins.Right,
+                MarginTopTwips = margins.Top,
+                MarginBottomTwips = margins.Bottom,
                 Orientation = printOptions.PaperOrientation == CrPaperOrientationEnum.crPaperOrientationLandscape
                     ? "Landscape"
                     : "Portrait"
@@ -86,6 +95,9 @@ namespace VibeyReports.CrystalWorker
             }
             catch
             {
+                // Deliberately bare: reading layout must never require a live database
+                // connection, so any failure here (logon prompt, network error, driver
+                // exception, or anything else) is swallowed rather than enumerated.
                 schema.AvailableFields.Clear();
             }
 
