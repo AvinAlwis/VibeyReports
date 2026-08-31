@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/VibeyReports.Contracts/VibeyReports.Contracts.csproj" />
+    <Project Path="src/VibeyReports.CrystalWorker/VibeyReports.CrystalWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/VibeyReports.Contracts.Tests/VibeyReports.Contracts.Tests.csproj" />
+    <Project Path="tests/VibeyReports.CrystalWorker.Tests/VibeyReports.CrystalWorker.Tests.csproj" />
   </Folder>
 </Solution>

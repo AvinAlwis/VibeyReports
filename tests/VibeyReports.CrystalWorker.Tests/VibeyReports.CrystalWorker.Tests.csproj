@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <CrystalDir>C:\Program Files (x86)\Business Objects\Common\3.5\managed\dotnet2</CrystalDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="FluentAssertions" Version="8.9.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\VibeyReports.CrystalWorker\VibeyReports.CrystalWorker.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      The test project calls members whose types come from the Crystal RAS assemblies
+      (ISCDReportClientDocument, ReportDefController, ReportDefinition, Sections, ...).
+      A ProjectReference to VibeyReports.CrystalWorker does not flow those transitively for
+      compilation purposes (transitive <Reference> items are not resolved as metadata
+      references across a P2P boundary) even though CrystalWorker copies them to its own
+      output locally, so the test project needs its own compile-time references to the
+      same assemblies, from the same single source location as the worker.
+    -->
+    <Reference Include="CrystalDecisions.ReportAppServer.ClientDoc">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ClientDoc.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.Controllers">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.Controllers.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.ReportDefModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ReportDefModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.CommonObjectModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.CommonObjectModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.DataDefModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.DataDefModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.CommLayer">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.CommLayer.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.ObjectFactory">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ObjectFactory.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+  </ItemGroup>
+</Project>
