@@ -35,6 +35,11 @@ public class LayoutPlanValidatorTests
                 Name = "Section3", Kind = "Details", HeightTwips = 400,
                 Objects = { new ObjectInfo { Name = "CustomerName", Kind = "Field", LeftTwips = 300, TopTwips = 20, WidthTwips = 2500, HeightTwips = 300, DataSource = "{Customer.Name}" } }
             }
+        },
+        AvailableFields =
+        {
+            new FieldInfo { Name = "stage_name", FormulaForm = "{Command.stage_name}",
+                            TableAlias = "Command", ValueType = "String", HeadingText = "Stage Name" }
         }
     };
 
@@ -479,6 +484,89 @@ public class LayoutPlanValidatorTests
         var result = LayoutPlanValidator.Validate(plan, Schema());
 
         result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    // --- Task 6b: addField ---
+
+    [Fact]
+    public void Validate_AcceptsAddFieldReferencingAnAvailableField()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "fStageName",
+            FieldRef = "{Command.stage_name}",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddFieldReferencingAFieldNotInTheReportsDataSource()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "fBogus",
+            FieldRef = "{Command.salary_secret}",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("salary_secret");
+        result.Errors[0].Message.Should().Contain("not a field in this report");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddFieldWithoutAFieldRef()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "fNoRef",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("fieldRef");
+    }
+
+    [Fact]
+    public void Validate_AllowsFontOperationsOnAFieldAddedEarlierInThePlan()
+    {
+        // addField creates a Kind="Field" object, which IS fontable. Guards against an F1 regression.
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = "Section3", NewName = "fStageName",
+                FieldRef = "{Command.stage_name}",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+            },
+            new LayoutOperation { Action = LayoutActions.SetBold, Target = "fStageName", Bold = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddFieldWhoseNewNameCollides()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "CustomerName",
+            FieldRef = "{Command.stage_name}",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("already exists");
     }
 }
 

@@ -19,18 +19,19 @@ public class LayoutApplierTests
     /// and every test in this file mutates a session opened directly on Fixtures.SampleReport, so
     /// checking it here covers all of them for free.
     /// </summary>
-    private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath)
+    private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath, string sourcePath = null)
     {
-        var sourceBefore = File.ReadAllBytes(Fixtures.SampleReport);
+        sourcePath = sourcePath ?? Fixtures.SampleReport;
+        var sourceBefore = File.ReadAllBytes(sourcePath);
 
         var dest = TempRpt();
-        using (var session = CrystalSession.Open(Fixtures.SampleReport))
+        using (var session = CrystalSession.Open(sourcePath))
         {
             LayoutApplier.Apply(session, plan);
             session.SaveAs(dest, overwrite: false);
         }
 
-        File.ReadAllBytes(Fixtures.SampleReport).Should().Equal(sourceBefore,
+        File.ReadAllBytes(sourcePath).Should().Equal(sourceBefore,
             because: "the source report must never be modified");
 
         savedPath = dest;
@@ -470,5 +471,52 @@ public class LayoutApplierTests
         Action save = () => session.SaveAs(dest, overwrite: false);
         save.Should().Throw<InvalidOperationException>().WithMessage("*partially-applied*");
         File.Exists(dest).Should().BeFalse();
+    }
+
+    // --- Task 6b: addField ---
+
+    /// <summary>
+    /// SampleReport.rpt's only Details section (DetailSection1) is 221 twips tall -- there is no
+    /// Details section on it at least 260 twips tall, so this test uses PMSV10_IndPerfOverview.rpt
+    /// instead, whose DetailSection1 is 13104 twips tall and whose AvailableFields is populated
+    /// (measured directly; see task-6b-report.md).
+    /// </summary>
+    [Fact]
+    public void Apply_AddsABoundFieldWhoseDataSourceSurvivesSaveAndReopen()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string fieldRef;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 260).Name;
+            fieldRef = schema.AvailableFields.First().FormulaForm;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddField, Section = sectionName, NewName = "VibeyField",
+                    FieldRef = fieldRef,
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2500, HeightTwips = 240
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                                   .SingleOrDefault(o => o.Name == "VibeyField");
+            added.Should().NotBeNull();
+            added!.Kind.Should().Be("Field");
+            added.DataSource.Should().Be(fieldRef);
+            added.WidthTwips.Should().Be(2500);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
     }
 }

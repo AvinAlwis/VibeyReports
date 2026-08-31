@@ -60,6 +60,12 @@ public static class LayoutPlanValidator
         var printableWidth = schema.Page.WidthTwips - schema.Page.MarginLeftTwips - schema.Page.MarginRightTwips;
         var printableHeight = schema.Page.HeightTwips - schema.Page.MarginTopTwips - schema.Page.MarginBottomTwips;
 
+        // addField's security boundary: fieldRef must exactly match a formulaForm already
+        // exposed by the report's data source. This is the only allowlist for addField.
+        var availableFieldRefs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in schema.AvailableFields ?? new List<FieldInfo>())
+            if (!string.IsNullOrWhiteSpace(f.FormulaForm)) availableFieldRefs.Add(f.FormulaForm);
+
         for (var i = 0; i < plan.Operations.Count; i++)
         {
             var op = plan.Operations[i];
@@ -71,7 +77,7 @@ public static class LayoutPlanValidator
                 continue;
             }
 
-            var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight);
+            var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight, availableFieldRefs);
             result.Errors.AddRange(errors);
         }
 
@@ -83,7 +89,8 @@ public static class LayoutPlanValidator
         LayoutOperation op, int index,
         Dictionary<string, SimObject> objects,
         Dictionary<string, int> sectionHeights,
-        int printableWidth, int printableHeight)
+        int printableWidth, int printableHeight,
+        HashSet<string> availableFieldRefs)
     {
         var errs = new List<ValidationError>();
         void Err(string m) => errs.Add(new ValidationError { OperationIndex = index, Message = m });
@@ -98,7 +105,7 @@ public static class LayoutPlanValidator
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
             or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment;
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
-            or LayoutActions.AddBox or LayoutActions.ResizeSection;
+            or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField;
 
         SimObject? target = null;
         if (needsTarget)
@@ -213,10 +220,26 @@ public static class LayoutPlanValidator
             case LayoutActions.AddText:
             case LayoutActions.AddLine:
             case LayoutActions.AddBox:
+            case LayoutActions.AddField:
             {
                 if (string.IsNullOrWhiteSpace(op.NewName)) { Err($"\"{action}\" requires \"newName\"."); return errs; }
                 if (objects.ContainsKey(op.NewName!)) { Err($"An object named \"{op.NewName}\" already exists in the report."); return errs; }
                 if (action == LayoutActions.AddText && string.IsNullOrEmpty(op.Text)) Err("\"addText\" requires \"text\".");
+
+                if (action == LayoutActions.AddField)
+                {
+                    if (string.IsNullOrWhiteSpace(op.FieldRef))
+                    {
+                        Err("\"addField\" requires \"fieldRef\".");
+                        return errs;
+                    }
+                    if (!availableFieldRefs.Contains(op.FieldRef!))
+                    {
+                        Err($"\"{op.FieldRef}\" is not a field in this report's data source. " +
+                            "Use one of the formulaForm values from the report schema's availableFields.");
+                        return errs;
+                    }
+                }
 
                 if (op.LeftTwips is null || op.TopTwips is null || op.WidthTwips is null || op.HeightTwips is null)
                 { Err($"\"{action}\" requires leftTwips, topTwips, widthTwips and heightTwips."); return errs; }
@@ -246,7 +269,7 @@ public static class LayoutPlanValidator
                     objects[op.NewName!] = new SimObject
                     {
                         Section = op.Section!, Left = l, Top = t, Width = w, Height = h,
-                        Kind = action == LayoutActions.AddText ? "Text" : action == LayoutActions.AddLine ? "Line" : "Box"
+                        Kind = KindForAdd(action)
                     };
                 break;
             }
@@ -290,6 +313,12 @@ public static class LayoutPlanValidator
 
     private static bool IsFontable(SimObject o) =>
         FontableKinds.Contains(o.Kind ?? "");
+
+    private static string KindForAdd(string action) =>
+        action == LayoutActions.AddText  ? "Text"
+      : action == LayoutActions.AddLine  ? "Line"
+      : action == LayoutActions.AddField ? "Field"
+      : "Box";
 
     private sealed class SimObject
     {

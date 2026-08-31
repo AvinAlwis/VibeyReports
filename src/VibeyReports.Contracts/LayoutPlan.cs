@@ -14,11 +14,12 @@ public static class LayoutActions
     public const string AddLine = "addLine";
     public const string AddBox = "addBox";
     public const string ResizeSection = "resizeSection";
+    public const string AddField = "addField";
 
     public static readonly string[] All =
     {
         Move, Resize, SetFont, SetFontSize, SetBold,
-        SetAlignment, AddText, AddLine, AddBox, ResizeSection
+        SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField
     };
 }
 
@@ -39,10 +40,10 @@ public sealed class LayoutOperation
     /// <summary>Existing object name. Required for move/resize/setFont/setFontSize/setBold/setAlignment.</summary>
     public string? Target { get; set; }
 
-    /// <summary>Section name. Required for addText/addLine/addBox/resizeSection.</summary>
+    /// <summary>Section name. Required for addText/addLine/addBox/resizeSection/addField.</summary>
     public string? Section { get; set; }
 
-    /// <summary>Name to give a newly created object. Required for addText/addLine/addBox.</summary>
+    /// <summary>Name to give a newly created object. Required for addText/addLine/addBox/addField.</summary>
     public string? NewName { get; set; }
 
     public int? LeftTwips { get; set; }
@@ -58,4 +59,10 @@ public sealed class LayoutOperation
 
     /// <summary>Literal text for addText.</summary>
     public string? Text { get; set; }
+
+    /// <summary>
+    /// Bindable field expression for addField, e.g. "{Command.stage_name}".
+    /// Must exactly match a ReportSchema.AvailableFields[].FormulaForm.
+    /// </summary>
+    public string? FieldRef { get; set; }
 }
