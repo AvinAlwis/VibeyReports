@@ -436,6 +436,50 @@ public class LayoutPlanValidatorTests
 
         result.IsValid.Should().BeFalse();
     }
+
+    // --- Round 2 fix (F1): RAS only supports horizontal or vertical lines ---
+
+    [Fact]
+    public void Validate_RejectsAddLineWithBothAxesNonZero()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddLine, Section = "Section1", NewName = "DiagonalRule",
+            LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 340
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("horizontal or vertical");
+    }
+
+    [Fact]
+    public void Validate_RejectsResizeOfALineToBothAxesNonZero()
+    {
+        // HeaderRule is a Line (WidthTwips = 3000, HeightTwips = 0) in the fixed schema above.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.Resize, Target = "HeaderRule", WidthTwips = 2880, HeightTwips = 340
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("horizontal or vertical");
+    }
+
+    [Fact]
+    public void Validate_AcceptsResizeOfALineThatStaysHorizontalOrVertical()
+    {
+        var plan = PlanOf(
+            // Stays horizontal.
+            new LayoutOperation { Action = LayoutActions.Resize, Target = "HeaderRule", WidthTwips = 2000, HeightTwips = 0 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
 }
 
 internal static class PlanExtensions

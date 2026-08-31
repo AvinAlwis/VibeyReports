@@ -22,6 +22,7 @@ namespace VibeyReports.CrystalWorker
     {
         private ReportDocument _engineDoc;
         private bool _disposed;
+        private bool _faulted;
 
         private CrystalSession(ReportDocument engineDoc, string sourcePath)
         {
@@ -40,6 +41,14 @@ namespace VibeyReports.CrystalWorker
             }
         }
 
+        /// <summary>
+        /// Marks this session as holding a partially-applied plan. A faulted session refuses to save,
+        /// because its document no longer corresponds to any plan the caller asked for.
+        /// </summary>
+        public void MarkFaulted() => _faulted = true;
+
+        public bool IsFaulted => _faulted;
+
         public static CrystalSession Open(string rptPath)
         {
             if (string.IsNullOrWhiteSpace(rptPath)) throw new ArgumentException("Report path is required.", nameof(rptPath));
@@ -57,6 +66,10 @@ namespace VibeyReports.CrystalWorker
         public void SaveAs(string destinationPath, bool overwrite)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CrystalSession));
+            if (_faulted)
+                throw new InvalidOperationException(
+                    "This session holds a partially-applied layout plan and cannot be saved. " +
+                    "Re-open the report and re-apply a corrected plan.");
             if (string.IsNullOrWhiteSpace(destinationPath)) throw new ArgumentException("Destination path is required.", nameof(destinationPath));
 
             var full = Path.GetFullPath(destinationPath);

@@ -1,9 +1,16 @@
 using System;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using CrystalDecisions.ReportAppServer.ClientDoc;
 using CrystalDecisions.ReportAppServer.Controllers;
 using CrystalDecisions.ReportAppServer.ReportDefModel;
 using VibeyReports.Contracts;
+
+// F1 now rejects a both-axes-non-zero line at validation time, which makes it impossible to drive
+// LayoutApplier.Apply's own mid-plan COMException/faulted-session path through the public API with a
+// validator-legal-but-applier-hostile operation. ApplyOperationsWithoutValidation below is the
+// deliberate seam the round-2 fix report documents for exercising that path directly in tests.
+[assembly: InternalsVisibleTo("VibeyReports.CrystalWorker.Tests")]
 
 namespace VibeyReports.CrystalWorker
 {
@@ -34,65 +41,93 @@ namespace VibeyReports.CrystalWorker
             var validation = LayoutPlanValidator.Validate(plan, schema);
             if (!validation.IsValid) throw new InvalidPlanException(validation);
 
+            return ApplyOperationsWithoutValidation(session, plan);
+        }
+
+        /// <summary>
+        /// The mutation loop, with no call to LayoutPlanValidator.Validate. Test-only seam: F1 means
+        /// no validator-legal plan can any longer reach an applier-level failure (e.g. a diagonal
+        /// line's raw COMException) through the public <see cref="Apply"/> entry point, so the
+        /// round-2 fix-report's F2 regression test (faulted session refuses to save) calls this
+        /// internal method directly with a plan that Validate would now reject. Production code must
+        /// always go through <see cref="Apply"/>.
+        /// </summary>
+        internal static int ApplyOperationsWithoutValidation(CrystalSession session, LayoutPlan plan)
+        {
             var doc = session.Document;
             var applied = 0;
 
             foreach (var op in plan.Operations)
             {
-                switch (op.Action)
+                try
                 {
-                    case LayoutActions.Move:
-                        ModifyObject(doc, op.Target, o =>
-                        {
-                            o.Left = op.LeftTwips.Value;
-                            o.Top = op.TopTwips.Value;
-                            SyncEndpoints(o);
-                        });
-                        break;
+                    switch (op.Action)
+                    {
+                        case LayoutActions.Move:
+                            ModifyObject(doc, op.Target, o =>
+                            {
+                                o.Left = op.LeftTwips.Value;
+                                o.Top = op.TopTwips.Value;
+                                SyncEndpoints(o);
+                            });
+                            break;
 
-                    case LayoutActions.Resize:
-                        ModifyObject(doc, op.Target, o =>
-                        {
-                            o.Width = op.WidthTwips.Value;
-                            o.Height = op.HeightTwips.Value;
-                            SyncEndpoints(o);
-                        });
-                        break;
+                        case LayoutActions.Resize:
+                            ModifyObject(doc, op.Target, o =>
+                            {
+                                o.Width = op.WidthTwips.Value;
+                                o.Height = op.HeightTwips.Value;
+                                SyncEndpoints(o);
+                            });
+                            break;
 
-                    case LayoutActions.SetFont:
-                        ModifyObject(doc, op.Target, o => WithFont(o, f => f.Name = op.FontName));
-                        break;
+                        case LayoutActions.SetFont:
+                            ModifyObject(doc, op.Target, o => WithFont(o, f => f.Name = op.FontName));
+                            break;
 
-                    case LayoutActions.SetFontSize:
-                        ModifyObject(doc, op.Target, o => WithFont(o, f => f.Size = (decimal)op.FontSizePt.Value));
-                        break;
+                        case LayoutActions.SetFontSize:
+                            ModifyObject(doc, op.Target, o => WithFont(o, f => f.Size = (decimal)op.FontSizePt.Value));
+                            break;
 
-                    case LayoutActions.SetBold:
-                        ModifyObject(doc, op.Target, o => WithFont(o, f => f.Bold = op.Bold.Value));
-                        break;
+                        case LayoutActions.SetBold:
+                            ModifyObject(doc, op.Target, o => WithFont(o, f => f.Bold = op.Bold.Value));
+                            break;
 
-                    case LayoutActions.SetAlignment:
-                        ModifyObject(doc, op.Target, o => o.Format.HorizontalAlignment = ParseAlignment(op.Alignment));
-                        break;
+                        case LayoutActions.SetAlignment:
+                            ModifyObject(doc, op.Target, o =>
+                            {
+                                if (o.Format == null)
+                                    throw new InvalidOperationException($"Object \"{o.Name}\" has no format object to align.");
+                                o.Format.HorizontalAlignment = ParseAlignment(op.Alignment);
+                            });
+                            break;
 
-                    case LayoutActions.AddText:
-                        AddText(doc, op);
-                        break;
+                        case LayoutActions.AddText:
+                            AddText(doc, op);
+                            break;
 
-                    case LayoutActions.AddLine:
-                        AddLine(doc, op);
-                        break;
+                        case LayoutActions.AddLine:
+                            AddLine(doc, op);
+                            break;
 
-                    case LayoutActions.AddBox:
-                        AddBox(doc, op);
-                        break;
+                        case LayoutActions.AddBox:
+                            AddBox(doc, op);
+                            break;
 
-                    case LayoutActions.ResizeSection:
-                        ResizeSection(doc, op.Section, op.HeightTwips.Value);
-                        break;
+                        case LayoutActions.ResizeSection:
+                            ResizeSection(doc, op.Section, op.HeightTwips.Value);
+                            break;
 
-                    default:
-                        throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
+                        default:
+                            throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
+                    }
+                }
+                catch
+                {
+                    // Operations 0..applied-1 are already on the live document and cannot be rolled
+                    // back. Mark the session so SaveAs refuses to persist a half-applied document.
+                    session.MarkFaulted();
+                    throw;
                 }
 
                 applied++;

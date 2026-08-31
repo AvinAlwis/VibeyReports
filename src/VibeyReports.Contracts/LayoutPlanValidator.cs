@@ -167,6 +167,13 @@ public static class LayoutPlanValidator
                 if (h < 0) Err("\"heightTwips\" must not be negative.");
                 if (errs.Count > 0) return errs;
 
+                // F1: RAS only supports horizontal or vertical lines; a both-axes line is
+                // rejected at the COM boundary, so a resize that would make a Line diagonal
+                // must be caught here instead of throwing a raw COMException in the applier.
+                if (target!.Kind == "Line" && w != 0 && h != 0)
+                    Err($"A line must be horizontal or vertical: set widthTwips or heightTwips to 0 (got {w} x {h}).");
+                if (errs.Count > 0) return errs;
+
                 // F2: long arithmetic so a huge width/height cannot wrap the sum negative.
                 var newRight = (long)target!.Left + w;
                 var newBottom = (long)target.Top + h;
@@ -218,6 +225,13 @@ public static class LayoutPlanValidator
                 var w = op.WidthTwips.Value; var h = op.HeightTwips.Value;
                 if (l < 0 || t < 0) Err("Coordinates must not be negative.");
                 if (w < 0 || h < 0) Err("Sizes must not be negative.");
+                if (errs.Count > 0) return errs;
+
+                // F1: RAS only supports horizontal or vertical lines; a both-axes line is
+                // rejected at the COM boundary, so this must be caught here instead of
+                // throwing a raw COMException in the applier.
+                if (action == LayoutActions.AddLine && w != 0 && h != 0)
+                    Err($"A line must be horizontal or vertical: set widthTwips or heightTwips to 0 (got {w} x {h}).");
                 if (errs.Count > 0) return errs;
 
                 // F2: long arithmetic so a huge left/top/width/height cannot wrap negative.

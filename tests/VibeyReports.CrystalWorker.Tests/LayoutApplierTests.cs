@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using CrystalDecisions.ReportAppServer.ReportDefModel;
 using FluentAssertions;
 using VibeyReports.Contracts;
 using VibeyReports.CrystalWorker;
@@ -12,15 +13,25 @@ public class LayoutApplierTests
 {
     private static string TempRpt() => Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
 
-    /// <summary>Applies a plan, saves, reopens, and hands back the resulting schema.</summary>
+    /// <summary>
+    /// Applies a plan, saves, reopens, and hands back the resulting schema. T3: also asserts the
+    /// source .rpt was never touched -- "the source must never be modified" is a global constraint,
+    /// and every test in this file mutates a session opened directly on Fixtures.SampleReport, so
+    /// checking it here covers all of them for free.
+    /// </summary>
     private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath)
     {
+        var sourceBefore = File.ReadAllBytes(Fixtures.SampleReport);
+
         var dest = TempRpt();
         using (var session = CrystalSession.Open(Fixtures.SampleReport))
         {
             LayoutApplier.Apply(session, plan);
             session.SaveAs(dest, overwrite: false);
         }
+
+        File.ReadAllBytes(Fixtures.SampleReport).Should().Equal(sourceBefore,
+            because: "the source report must never be modified");
 
         savedPath = dest;
         using var reopened = CrystalSession.Open(dest);
@@ -301,5 +312,163 @@ public class LayoutApplierTests
             line.WidthTwips.Should().Be(2880);
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    // --- Round 2 fix regression tests (F1-F3, T1-T3) ---
+
+    /// <summary>
+    /// T1 (the highest-value missing test in the task, per the round-1 review): SyncEndpoints in the
+    /// Resize branch had zero coverage and fails SILENTLY, unlike Move. Measured by the reviewer:
+    /// deleting `SyncEndpoints(o)` from the Resize case alone keeps every other test in this file
+    /// green in memory (the reader reports the requested Width back before save) while persisting the
+    /// WRONG width to the .rpt, because RAS actually renders/derives geometry from Right/Bottom, and
+    /// an unsynced Right survives save-and-reopen as the old, wider value. This test only passes if
+    /// Resize keeps Right/Bottom in sync with Width/Height.
+    /// </summary>
+    [Fact]
+    public void Apply_ResizingALineNarrowerPersistsTheRequestedWidthNotTheStaleEndpoint()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddLine, Section = sectionName, NewName = "ShrinkingRule",
+                    LeftTwips = 0, TopTwips = 100, WidthTwips = 2880, HeightTwips = 0
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.Resize, Target = "ShrinkingRule",
+                    WidthTwips = 1440, HeightTwips = 0
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var line = schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == "ShrinkingRule");
+            line.WidthTwips.Should().Be(1440,
+                because: "an unsynced Right endpoint would persist the old 2880-wide geometry even though the reader reads Width=1440 back before save");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// T2: ObjectInfo exposes only Left/Top/Width/Height, so the other endpoint tests in this file
+    /// verify Right/Bottom only by proxy (through Width/Height after reopen). This test reopens the
+    /// saved report and asserts Right/Bottom directly on the RAS object itself -- the one property
+    /// C3/SyncEndpoints exists to protect, and the only test that observes it directly.
+    /// </summary>
+    [Fact]
+    public void Apply_MovedAndResizedLineHasConsistentRightAndBottomOnTheRasObjectItself()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddLine, Section = sectionName, NewName = "RasCheckedRule",
+                    LeftTwips = 0, TopTwips = 100, WidthTwips = 2880, HeightTwips = 0
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.Move, Target = "RasCheckedRule", LeftTwips = 360, TopTwips = 150
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.Resize, Target = "RasCheckedRule", WidthTwips = 1000, HeightTwips = 0
+                }
+            }
+        };
+
+        var dest = TempRpt();
+        var sourceBefore = File.ReadAllBytes(Fixtures.SampleReport);
+        using (var session = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            LayoutApplier.Apply(session, plan);
+            session.SaveAs(dest, overwrite: false);
+        }
+        File.ReadAllBytes(Fixtures.SampleReport).Should().Equal(sourceBefore,
+            because: "the source report must never be modified");
+
+        try
+        {
+            using var reopened = CrystalSession.Open(dest);
+            var all = reopened.Document.ReportDefController.ReportObjectController.GetAllReportObjects();
+            ISCRLineObject line = null;
+            for (var i = 0; i < all.Count; i++)
+            {
+                if (all[i] is ISCRLineObject candidate &&
+                    string.Equals(candidate.Name, "RasCheckedRule", StringComparison.OrdinalIgnoreCase))
+                {
+                    line = candidate;
+                    break;
+                }
+            }
+
+            line.Should().NotBeNull();
+            line!.Left.Should().Be(360);
+            line.Top.Should().Be(150);
+            line.Width.Should().Be(1000);
+            line.Right.Should().Be(line.Left + line.Width);
+            line.Bottom.Should().Be(line.Top + line.Height);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
+    /// <summary>
+    /// F2: a mid-plan applier failure (not a validation failure) must mark the session faulted so
+    /// SaveAs refuses to persist a half-applied document. F1 now rejects a both-axes-non-zero line at
+    /// validation time, which means the original repro (a validator-legal diagonal addLine reaching
+    /// the applier and throwing a raw COMException) can no longer be driven through the public
+    /// LayoutApplier.Apply entry point -- LayoutPlanValidator.Validate would reject it first, and the
+    /// document would never be touched at all. To still exercise the applier-level failure path (as
+    /// opposed to the already-covered validation-failure path in
+    /// Apply_ThrowsInvalidPlanExceptionAndChangesNothingWhenThePlanIsInvalid), this test calls the
+    /// internal LayoutApplier.ApplyOperationsWithoutValidation seam directly with the same
+    /// good-line-then-diagonal-line plan the round-1 review used to demonstrate the bug, bypassing
+    /// LayoutPlanValidator entirely (VibeyReports.CrystalWorker.Tests has InternalsVisibleTo access).
+    /// Production code always goes through the public Apply, which validates first.
+    /// </summary>
+    [Fact]
+    public void Apply_WhenAnOperationFailsMidPlan_TheSessionRefusesToSave()
+    {
+        string sectionName;
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        sectionName = ReportReader.Read(session).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName,
+                    NewName = "GoodRule", LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 0 },
+                // Both axes non-zero: LayoutPlanValidator (F1) would now reject this, so it is only
+                // reachable by calling the internal, validation-free apply path below.
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName,
+                    NewName = "BadRule",  LeftTwips = 0, TopTwips = 10, WidthTwips = 2880, HeightTwips = 340 }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+        apply.Should().Throw<Exception>();
+
+        session.IsFaulted.Should().BeTrue();
+
+        var dest = TempRpt();
+        Action save = () => session.SaveAs(dest, overwrite: false);
+        save.Should().Throw<InvalidOperationException>().WithMessage("*partially-applied*");
+        File.Exists(dest).Should().BeFalse();
     }
 }
