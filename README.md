@@ -22,6 +22,11 @@ repository's dependencies.
 .\publish.ps1
 ```
 
+Invoke it as `.\publish.ps1` or `& .\publish.ps1` from a PowerShell prompt. Avoid nesting a
+`powershell.exe -File .\publish.ps1` child process inside an already-running PowerShell
+session — `$PSScriptRoot` can come back empty there, which the script now guards against,
+but a plain in-session invocation avoids the problem entirely.
+
 This publishes the two executables to **separate directories**, deliberately:
 
 ```
@@ -104,10 +109,13 @@ worker; a failed probe writes to stderr and exits 1.)
 ## Supported operations
 
 `move`, `resize`, `setFont`, `setFontSize`, `setBold`, `setAlignment`, `addText`, `addLine`,
-`addBox`, `resizeSection`.
+`addBox`, `resizeSection`, `addField`.
 
 Layout only. Database connections, SQL, formulas, parameters, record selection and grouping
-cannot be changed; `LayoutPlanValidator` rejects any attempt.
+cannot be changed; `LayoutPlanValidator` rejects any attempt. `addField`'s `fieldRef` is the
+one operation with its own security boundary: it must exactly match a `formulaForm` already
+exposed by the report's own data source (see `ReportSchema.AvailableFields`) — it cannot be
+used to add new tables, formulas, or connections.
 
 ## Tests
 

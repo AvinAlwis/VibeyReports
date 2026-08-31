@@ -14,10 +14,26 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputDir = "$PSScriptRoot\dist"
+    [string]$OutputDir
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Nesting `powershell.exe -File .\publish.ps1` inside an already-running PowerShell session
+# can leave $PSScriptRoot empty (observed during Task 11 verification) — the script would
+# then silently resolve its default $OutputDir to the current drive root (e.g. D:\dist)
+# instead of this repo's dist\ folder, and every Test-Path check below would still pass
+# because the wrong location is a real one. Guard against that rather than trusting
+# $PSScriptRoot blindly, and fail loudly if it truly can't be determined.
+if (-not $PSScriptRoot) {
+    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if (-not $PSScriptRoot) {
+    throw "Could not determine this script's own directory (`$PSScriptRoot and `$MyInvocation.MyCommand.Path were both empty). Invoke it directly, e.g. '& .\publish.ps1', rather than nested inside another powershell.exe process."
+}
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $PSScriptRoot 'dist'
+}
 
 $workerOutputDir = Join-Path $OutputDir 'worker'
 
