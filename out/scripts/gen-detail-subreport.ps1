@@ -8,6 +8,23 @@
 # which Crystal repeats per goal inside the host report's frame.
 #
 # Column widths match the host report exactly so the two line up when embedded.
+#
+# MANUAL STEP THIS SCRIPT CANNOT REPRODUCE -- re-apply it after regenerating:
+#
+#   goal_id is a BIGINT, so Crystal renders it with its default number format:
+#   thousands separator and two decimals ("10,311.00"). It was fixed by hand in
+#   the Designer with a custom format showing the bare number.
+#
+#   Vibey Reports cannot do this. There is no number-format operation, and more
+#   fundamentally the field lives inside the EMBEDDED sub-report while every
+#   operation acts on the host document -- reach is the problem, not the missing
+#   operation. Casting goal_id to VARCHAR in sp_perf_goal_align_detail would fix
+#   it at the source, but the decision was to keep the column BIGINT.
+#
+#   So: after running this script and re-importing, open the sub-report in the
+#   Designer, right-click the goal_id field > Format Field > Number, and set a
+#   custom format with no decimals and no thousands separator. Otherwise the
+#   regenerated report silently reverts to "10,311.00".
 
 $ops = New-Object System.Collections.ArrayList
 $col = New-Object System.Collections.ArrayList
