@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VibeyReports.Contracts/VibeyReports.Contracts.csproj" />
+    <Project Path="src/VibeyReports.CrystalWorker/VibeyReports.CrystalWorker.csproj" />
+    <Project Path="src/VibeyReports.Mcp/VibeyReports.Mcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VibeyReports.Contracts.Tests/VibeyReports.Contracts.Tests.csproj" />
+    <Project Path="tests/VibeyReports.CrystalWorker.Tests/VibeyReports.CrystalWorker.Tests.csproj" />
+    <Project Path="tests/VibeyReports.FakeWorker/VibeyReports.FakeWorker.csproj" />
+    <Project Path="tests/VibeyReports.Mcp.Tests/VibeyReports.Mcp.Tests.csproj" />
+  </Folder>
+</Solution>

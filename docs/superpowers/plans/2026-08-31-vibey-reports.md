@@ -1,5 +1,11 @@
 # Vibey Reports Implementation Plan
 
+> **This plan predates execution.** It was written before the Crystal Reports XI R2 RAS SDK had
+> been exercised on the target machine, and nine of its assumptions about that SDK's actual
+> behaviour turned out to be wrong once measured. **[docs/sdk-notes.md](../../sdk-notes.md) is
+> authoritative wherever the two disagree** — read it before relying on this plan's SDK-facing
+> code samples (object model shapes, method signatures, encoding behaviour).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let Claude redesign the visual layout of an existing Crystal Reports XI R2 `.rpt` file and save a new `.rpt` that opens correctly in Crystal Reports XI R2 and in the PeoplesHR software.
@@ -1194,9 +1200,14 @@ public class CrystalSessionTests
     {
         using var session = CrystalSession.Open(Fixtures.SampleReport);
 
-        var sections = session.Document.ReportDefController.ReportDefinition.Sections;
+        var areas = session.Document.ReportDefController.ReportDefinition.Areas;
 
-        sections.Count.Should().BeGreaterThan(0);
+        var sectionCount = 0;
+        for (var i = 0; i < areas.Count; i++)
+            sectionCount += areas[i].Sections.Count;
+
+        areas.Count.Should().BeGreaterThan(0);
+        sectionCount.Should().BeGreaterThan(0);
     }
 
     [Fact]
@@ -1287,7 +1298,8 @@ Expected: FAIL — `The type or namespace name 'CrystalSession' could not be fou
 ```csharp
 using System;
 using System.IO;
-using CrystalDecisions.ReportAppServer.ClientDoc;
+using CrystalDecisions.CrystalReports.Engine;      // ReportDocument — the open path
+using CrystalDecisions.ReportAppServer.ClientDoc;  // ISCDReportClientDocument — the bridge
 
 namespace VibeyReports.CrystalWorker
 {
@@ -1296,12 +1308,13 @@ namespace VibeyReports.CrystalWorker
     /// </summary>
     public sealed class CrystalSession : IDisposable
     {
-        private ReportClientDocument _doc;
+        // The classic engine owns the file; the RAS client document is a bridge off it.
+        private ReportDocument _engineDoc;
         private bool _disposed;
 
-        private CrystalSession(ReportClientDocument doc, string sourcePath)
+        private CrystalSession(ReportDocument engineDoc, string sourcePath)
         {
-            _doc = doc;
+            _engineDoc = engineDoc;
             SourcePath = sourcePath;
         }
 
@@ -1312,7 +1325,7 @@ namespace VibeyReports.CrystalWorker
             get
             {
                 if (_disposed) throw new ObjectDisposedException(nameof(CrystalSession));
-                return _doc;
+                return _engineDoc.ReportClientDocument;
             }
         }
 
@@ -1323,13 +1336,15 @@ namespace VibeyReports.CrystalWorker
             var full = Path.GetFullPath(rptPath);
             if (!File.Exists(full)) throw new FileNotFoundException($"Report not found: {full}", full);
 
-            var doc = new ReportClientDocument();
-            // Keep the document open until we dispose it explicitly.
-            doc.set_AutoClose(false);
-            // 0 = default open options.
-            doc.Open(full, 0);
+            // CRITICAL: never `new ReportClientDocument()`. That activates the standalone RAS COM
+            // server, which TCP self-connects to port 1566 and hangs (~20-24s, then COMException
+            // "Failed to connect to server"). Opening through the classic engine and taking the
+            // .ReportClientDocument bridge off it costs ~2ms and makes no network connection.
+            // Measured on this machine; this is also how D:\RptToXml does it.
+            var engineDoc = new ReportDocument();
+            engineDoc.Load(full);
 
-            return new CrystalSession(doc, full);
+            return new CrystalSession(engineDoc, full);
         }
 
         public void SaveAs(string destinationPath, bool overwrite)
@@ -1350,7 +1365,7 @@ namespace VibeyReports.CrystalWorker
             if (File.Exists(full)) File.Delete(full);
 
             // SaveAs(name, directory, options). 0 = crReportOptionDefault.
-            _doc.SaveAs(Path.GetFileName(full), dir, 0);
+            Document.SaveAs(Path.GetFileName(full), dir, 0);
         }
 
         public void Dispose()
@@ -1360,14 +1375,14 @@ namespace VibeyReports.CrystalWorker
 
             try
             {
-                if (_doc != null && _doc.IsOpen) _doc.Close();
+                if (_engineDoc != null && _engineDoc.IsLoaded) _engineDoc.Close();
             }
             catch
             {
                 // A failed Close must not mask the real error from the caller.
             }
 
-            _doc = null;
+            _engineDoc = null;
         }
     }
 }
@@ -1564,25 +1579,34 @@ namespace VibeyReports.CrystalWorker
                     : "Portrait"
             };
 
-            var sections = doc.ReportDefController.ReportDefinition.Sections;
-            for (var i = 0; i < sections.Count; i++)
+            // VERIFIED: ISCRReportDefinition has NO `Sections` property. Sections live on Areas,
+            // and ISCRArea.Kind carries the band. Walk Areas, not Sections.
+            var areas = doc.ReportDefController.ReportDefinition.Areas;
+            for (var a = 0; a < areas.Count; a++)
             {
-                var section = sections[i];
-                var info = new SectionInfo
-                {
-                    Name = section.Name,
-                    Kind = ClassifySection(section.Name),
-                    HeightTwips = section.Height,
-                    Suppressed = section.Format != null && section.Format.EnableSuppress
-                };
+                var area = areas[a];
+                var band = ClassifyArea(area.Kind);
+                var sections = area.Sections;
 
-                var objects = section.ReportObjects;
-                for (var j = 0; j < objects.Count; j++)
+                for (var i = 0; i < sections.Count; i++)
                 {
-                    info.Objects.Add(ReadObject((ISCRReportObject)objects[j]));
+                    var section = sections[i];
+                    var info = new SectionInfo
+                    {
+                        Name = section.Name,
+                        Kind = band,
+                        HeightTwips = section.Height,
+                        Suppressed = section.Format != null && section.Format.EnableSuppress
+                    };
+
+                    var objects = section.ReportObjects;
+                    for (var j = 0; j < objects.Count; j++)
+                    {
+                        info.Objects.Add(ReadObject((ISCRReportObject)objects[j]));
+                    }
+
+                    schema.Sections.Add(info);
                 }
-
-                schema.Sections.Add(info);
             }
 
             return schema;
@@ -1660,20 +1684,23 @@ namespace VibeyReports.CrystalWorker
         }
 
         /// <summary>
-        /// RAS section names encode the band, e.g. "Section1" in area "ReportHeaderArea".
-        /// We classify by the report definition's area name prefix, which the section name mirrors.
+        /// The band comes from the parent Area's Kind, NOT from the section name.
+        /// RAS names sections "Section1", "Section2"... with no band encoded, so any
+        /// name-based heuristic returns "Other" for everything.
         /// </summary>
-        private static string ClassifySection(string sectionName)
+        private static string ClassifyArea(CrAreaSectionKindEnum kind)
         {
-            var n = (sectionName ?? "").ToUpperInvariant();
-            if (n.Contains("REPORTHEADER")) return "ReportHeader";
-            if (n.Contains("PAGEHEADER")) return "PageHeader";
-            if (n.Contains("GROUPHEADER")) return "GroupHeader";
-            if (n.Contains("DETAIL")) return "Details";
-            if (n.Contains("GROUPFOOTER")) return "GroupFooter";
-            if (n.Contains("REPORTFOOTER")) return "ReportFooter";
-            if (n.Contains("PAGEFOOTER")) return "PageFooter";
-            return "Other";
+            switch (kind)
+            {
+                case CrAreaSectionKindEnum.crAreaSectionKindReportHeader: return "ReportHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindPageHeader: return "PageHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindGroupHeader: return "GroupHeader";
+                case CrAreaSectionKindEnum.crAreaSectionKindDetail: return "Details";
+                case CrAreaSectionKindEnum.crAreaSectionKindGroupFooter: return "GroupFooter";
+                case CrAreaSectionKindEnum.crAreaSectionKindReportFooter: return "ReportFooter";
+                case CrAreaSectionKindEnum.crAreaSectionKindPageFooter: return "PageFooter";
+                default: return "Other";
+            }
         }
     }
 }
@@ -1687,7 +1714,17 @@ cd /d/VibeyReports && dotnet test tests/VibeyReports.CrystalWorker.Tests --filte
 
 Expected: PASS, 9 tests.
 
-**If `Read_ClassifiesSectionsIntoRecognisableBands` fails** because every section comes back `"Other"`: RAS names sections `Section1`, `Section2`… rather than encoding the band. Replace `ClassifySection(section.Name)` with a lookup over the areas — iterate `doc.ReportDefController.ReportDefinition.Areas`, and for each area use `area.Kind` (`CrAreaSectionKindEnum`: `crAreaSectionKindReportHeader`, `crAreaSectionKindPageHeader`, `crAreaSectionKindGroupHeader`, `crAreaSectionKindDetail`, `crAreaSectionKindGroupFooter`, `crAreaSectionKindReportFooter`, `crAreaSectionKindPageFooter`) to label each of `area.Sections`. Build a `Dictionary<string,string>` from section name to band before the section loop and read from it. Keep the test unchanged — it is asserting the right thing.
+**Confirmed area/section shape on this machine.** Walking `Areas` is now the primary path, not a fallback — verified against `SampleReport.rpt`, which yields five areas of one section each:
+
+```
+AREA ReportHeaderArea1 kind=1 sections=1
+AREA PageHeaderArea1   kind=2 sections=1
+AREA DetailArea1       kind=4 sections=1
+AREA PageFooterArea1   kind=7 sections=1
+AREA ReportFooterArea1 kind=8 sections=1
+```
+
+Section names are `Section1`, `Section2`… with no band encoded, which is why the original name-based heuristic would have returned `"Other"` for every section. If `areas[i]` does not compile as an indexer through the engine's RCD wrapper, use `areas.Item(i)`.
 
 - [ ] **Step 5: Commit**
 
@@ -2132,11 +2169,16 @@ namespace VibeyReports.CrystalWorker
             CrystalDecisions.ReportAppServer.ClientDoc.ISCDReportClientDocument doc,
             string sectionName)
         {
-            var sections = doc.ReportDefController.ReportDefinition.Sections;
-            for (var i = 0; i < sections.Count; i++)
+            // Sections live on Areas — ISCRReportDefinition has no Sections property.
+            var areas = doc.ReportDefController.ReportDefinition.Areas;
+            for (var a = 0; a < areas.Count; a++)
             {
-                var s = sections[i];
-                if (string.Equals(s.Name, sectionName, StringComparison.OrdinalIgnoreCase)) return s;
+                var sections = areas[a].Sections;
+                for (var i = 0; i < sections.Count; i++)
+                {
+                    var s = sections[i];
+                    if (string.Equals(s.Name, sectionName, StringComparison.OrdinalIgnoreCase)) return s;
+                }
             }
             throw new InvalidOperationException($"Section \"{sectionName}\" was not found; the validator should have rejected it.");
         }
@@ -3663,4 +3705,508 @@ applier) and multi-page preview (small: add a `page` parameter to `preview_repor
 
 **Type consistency.** `ReportSchema`/`PageInfo`/`SectionInfo`/`ObjectInfo` (Task 1) are consumed unchanged in Tasks 3, 5, 8. `LayoutPlan`/`LayoutOperation`/`LayoutActions` (Task 2) flow through Tasks 3, 6, 8, 9, 10. `LayoutPlanValidator.Validate(plan, schema)` is defined in Task 3 and called with that exact signature in Task 6. `CrystalSession.Open`/`SaveAs`/`Document` (Task 4) are used verbatim in Tasks 5, 6, 7, 8. `ReportReader.Read(session)` (Task 5) is called in Tasks 6 and 8. `LayoutApplier.Apply(session, plan)` and `InvalidPlanException.Result` (Task 6) are caught by name in Task 8. `WorkerRequest`/`WorkerResponse`/`WorkerCommands` (Task 8) are bound by `CrystalWorkerClient` (Task 9) and surfaced by `ReportTools` (Task 10). `CrystalWorkerClient.ReadAsync`/`ApplyAsync`/`RenderAsync` are declared in Task 9 and called in Task 10. All geometry properties are `*Twips` everywhere.
 
-**One known soft spot.** Task 5's `ClassifySection` guesses the band from the section name. RAS may well name sections `Section1`, `Section2`… with the band living on the parent `Area` instead. The test asserts the correct outcome and Step 4 carries the exact fix if it fails, so this surfaces as a red test rather than silently wrong data.
+**~~One known soft spot~~ — CONFIRMED AND FIXED during execution (2026-08-31).** The self-review flagged that `ClassifySection` might be guessing the band from a section name that does not encode it. That is exactly what happened. Reflection against the installed assembly confirmed `ISCRReportDefinition` has **no** `Sections` property at all: sections live on `Areas`, and `ISCRArea.Kind` (`CrAreaSectionKindEnum`) carries the band. Tasks 4, 5 and 6 above have been corrected to walk `Areas`, and `ClassifySection` is replaced by `ClassifyArea(area.Kind)`.
+
+**A second defect the plan did not anticipate.** `new ReportClientDocument()` activates the standalone RAS COM server, which TCP self-connects to port 1566 and hangs (~20-24s, then `COMException: Failed to connect to server`). Reports must be opened through the classic engine — `ReportDocument.Load(path)`, then `.ReportClientDocument` — which costs ~2ms and makes no network connection. Measured on this machine, and the full write path (clone → `Modify` → `SaveAs` → reopen → change persisted, source untouched) was verified through that bridge before the correction was written into the plan.
+
+---
+
+# Addendum A — `addField` (approved scope change, 2026-08-31)
+
+The user approved adding a bound-database-field operation after reviewing a target layout
+(a four-column table: bold headings in a header band, `stage_name` / `stage_period` /
+`stage_status` / `stage_outcome_score` in Details). Without `addField`, Vibey Reports can arrange
+those fields but cannot create them, so the layout is only reachable from a pre-seeded `.rpt`.
+
+**This does not weaken Global Constraint 5.** `addField` cannot add tables, change a connection,
+alter SQL, or touch table links. It may only reference a field **already present in the report's
+existing data source**, and the validator rejects any `fieldRef` that is not in the report's own
+field list. Nothing about the data source changes — only which of its existing fields are placed
+on the canvas.
+
+## Verified SDK surface (reflected from the installed 11.5 assemblies)
+
+- `doc.DatabaseController.Database.Tables` → collection of `ISCRTable`
+- `ISCRTable.DataFields` → collection of `ISCRDBField`
+- `ISCRDBField`: `Name`, **`FormulaForm`** (the `{Table.Field}` expression), `TableAlias`,
+  `Type` (`CrFieldValueTypeEnum`), `Kind` (`CrFieldKindEnum`), `HeadingText`, `LongName`
+- `ISCRFieldObject.DataSource` (String) — set this to a `FormulaForm` value to bind
+- `ReportObjectController.Add(ISCRReportObject, Section, int)` — same call the other adds use
+- `ReportObjectController.AddByName(String fieldName, String headingText)` — fallback only; it
+  chooses its own section and position, so it cannot satisfy a positioned layout plan
+
+`FormulaForm` is the join between reading and writing: `ObjectInfo.DataSource` already reports it
+for existing fields, so a plan can reference an existing field and a new one identically.
+
+---
+
+## Amendment to Task 5 — also extract the available field list
+
+Task 5's `ReportReader` gains one more responsibility. The spec's Phase 5 says the AI must be sent
+"Available fields"; the original plan dropped that, which is precisely why `addField` was
+unreachable. Restore it.
+
+**Additional files:** none — extend `src/VibeyReports.Contracts/ReportSchema.cs` and
+`src/VibeyReports.CrystalWorker/ReportReader.cs`.
+
+**Additional interface produced:** `ReportSchema.AvailableFields` (`List<FieldInfo>`), and:
+
+```csharp
+public sealed class FieldInfo
+{
+    /// <summary>Raw field name, e.g. "stage_name".</summary>
+    public string Name { get; set; } = "";
+    /// <summary>The bindable expression, e.g. "{Command.stage_name}". Use THIS as addField's fieldRef.</summary>
+    public string FormulaForm { get; set; } = "";
+    public string TableAlias { get; set; } = "";
+    /// <summary>String, Number, Currency, DateTime, Date, Time, Boolean, Blob, Other.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Crystal's default heading for this field, useful as addText content.</summary>
+    public string HeadingText { get; set; } = "";
+}
+```
+
+Extraction, inside `ReportReader.Read`, after the sections loop:
+
+```csharp
+var tables = doc.DatabaseController.Database.Tables;
+for (var t = 0; t < tables.Count; t++)
+{
+    var table = tables[t];
+    var fields = table.DataFields;
+    for (var f = 0; f < fields.Count; f++)
+    {
+        var dbField = (ISCRDBField)fields[f];
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = dbField.Name ?? "",
+            FormulaForm = dbField.FormulaForm ?? "",
+            TableAlias = dbField.TableAlias ?? "",
+            ValueType = ClassifyValueType(dbField.Type),
+            HeadingText = dbField.HeadingText ?? ""
+        });
+    }
+}
+```
+
+with:
+
+```csharp
+private static string ClassifyValueType(CrFieldValueTypeEnum type)
+{
+    switch (type)
+    {
+        case CrFieldValueTypeEnum.crFieldValueTypeStringField: return "String";
+        case CrFieldValueTypeEnum.crFieldValueTypeInt8sField:
+        case CrFieldValueTypeEnum.crFieldValueTypeInt8uField:
+        case CrFieldValueTypeEnum.crFieldValueTypeInt16sField:
+        case CrFieldValueTypeEnum.crFieldValueTypeInt16uField:
+        case CrFieldValueTypeEnum.crFieldValueTypeInt32sField:
+        case CrFieldValueTypeEnum.crFieldValueTypeInt32uField:
+        case CrFieldValueTypeEnum.crFieldValueTypeNumberField: return "Number";
+        case CrFieldValueTypeEnum.crFieldValueTypeCurrencyField: return "Currency";
+        case CrFieldValueTypeEnum.crFieldValueTypeDateField: return "Date";
+        case CrFieldValueTypeEnum.crFieldValueTypeTimeField: return "Time";
+        case CrFieldValueTypeEnum.crFieldValueTypeDateTimeField: return "DateTime";
+        case CrFieldValueTypeEnum.crFieldValueTypeBooleanField: return "Boolean";
+        case CrFieldValueTypeEnum.crFieldValueTypeBlobField: return "Blob";
+        default: return "Other";
+    }
+}
+```
+
+The exact `CrFieldValueTypeEnum` member names must be confirmed against the installed assembly; if
+a member above does not exist, keep the mapping shape and drop or rename that case. The reader must
+compile against the real enum, not this listing.
+
+**Additional tests for Task 5:**
+
+```csharp
+[Fact]
+public void Read_ReturnsAvailableFieldsWithBindableFormulaForms()
+{
+    using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+    var schema = ReportReader.Read(session);
+
+    schema.AvailableFields.Should().NotBeEmpty();
+    schema.AvailableFields.Should().OnlyContain(f => !string.IsNullOrWhiteSpace(f.Name));
+    schema.AvailableFields.Should().OnlyContain(f => f.FormulaForm.StartsWith("{") && f.FormulaForm.EndsWith("}"));
+}
+
+[Fact]
+public void Read_AvailableFieldsCoverTheDataSourcesOfPlacedFieldObjects()
+{
+    using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+    var schema = ReportReader.Read(session);
+    var placed = schema.Sections.SelectMany(s => s.Objects)
+                       .Where(o => o.Kind == "Field" && !string.IsNullOrWhiteSpace(o.DataSource))
+                       .Select(o => o.DataSource!)
+                       .ToList();
+
+    // Every already-placed database field should be referenceable by addField.
+    // Formula and special fields legitimately are not, so this asserts overlap, not containment.
+    if (placed.Count > 0)
+    {
+        placed.Any(p => schema.AvailableFields.Any(f => f.FormulaForm == p))
+              .Should().BeTrue();
+    }
+}
+```
+
+**Note for the implementer:** enumerating tables must not trigger a database logon. If it does on a
+fixture, catch the failure and leave `AvailableFields` empty for that report rather than failing the
+read — reading layout must never require a live connection. Add a test asserting `Read` still
+succeeds in that case.
+
+---
+
+## Task 6b: `addField`
+
+Run this AFTER Task 6 is complete and reviewed. It touches three already-committed files.
+
+**Files:**
+- Modify: `src/VibeyReports.Contracts/LayoutPlan.cs` (add the constant and `FieldRef`)
+- Modify: `src/VibeyReports.Contracts/LayoutPlanValidator.cs` (add the validation branch)
+- Modify: `src/VibeyReports.CrystalWorker/LayoutApplier.cs` (add the switch arm)
+- Test: `tests/VibeyReports.Contracts.Tests/LayoutPlanValidatorTests.cs` (extend)
+- Test: `tests/VibeyReports.CrystalWorker.Tests/LayoutApplierTests.cs` (extend)
+
+**Interfaces:**
+- Consumes: `ReportSchema.AvailableFields` / `FieldInfo` (Task 5 amendment), `CrystalSession`,
+  `ReportReader.Read`, everything from Tasks 2, 3 and 6.
+- Produces: `LayoutActions.AddField` (`"addField"`), `LayoutOperation.FieldRef`, and an eleventh
+  applier arm. Task 10's `apply_layout` description must list it.
+
+- [ ] **Step 1: Write the failing validator tests**
+
+Add to `LayoutPlanValidatorTests.cs`. Extend the shared `Schema()` factory with an available field
+so these can bind:
+
+```csharp
+// inside Schema(), alongside Sections:
+AvailableFields =
+{
+    new FieldInfo { Name = "stage_name", FormulaForm = "{Command.stage_name}",
+                    TableAlias = "Command", ValueType = "String", HeadingText = "Stage Name" }
+}
+```
+
+```csharp
+[Fact]
+public void Validate_AcceptsAddFieldReferencingAnAvailableField()
+{
+    var plan = PlanOf(new LayoutOperation
+    {
+        Action = LayoutActions.AddField, Section = "Section3", NewName = "fStageName",
+        FieldRef = "{Command.stage_name}",
+        LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+    });
+
+    var result = LayoutPlanValidator.Validate(plan, Schema());
+
+    result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+}
+
+[Fact]
+public void Validate_RejectsAddFieldReferencingAFieldNotInTheReportsDataSource()
+{
+    var plan = PlanOf(new LayoutOperation
+    {
+        Action = LayoutActions.AddField, Section = "Section3", NewName = "fBogus",
+        FieldRef = "{Command.salary_secret}",
+        LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+    });
+
+    var result = LayoutPlanValidator.Validate(plan, Schema());
+
+    result.IsValid.Should().BeFalse();
+    result.Errors[0].Message.Should().Contain("salary_secret");
+    result.Errors[0].Message.Should().Contain("not a field in this report");
+}
+
+[Fact]
+public void Validate_RejectsAddFieldWithoutAFieldRef()
+{
+    var plan = PlanOf(new LayoutOperation
+    {
+        Action = LayoutActions.AddField, Section = "Section3", NewName = "fNoRef",
+        LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+    });
+
+    var result = LayoutPlanValidator.Validate(plan, Schema());
+
+    result.IsValid.Should().BeFalse();
+    result.Errors[0].Message.Should().Contain("fieldRef");
+}
+
+[Fact]
+public void Validate_AllowsFontOperationsOnAFieldAddedEarlierInThePlan()
+{
+    // addField creates a Kind="Field" object, which IS fontable. Guards against an F1 regression.
+    var plan = PlanOf(
+        new LayoutOperation
+        {
+            Action = LayoutActions.AddField, Section = "Section3", NewName = "fStageName",
+            FieldRef = "{Command.stage_name}",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+        },
+        new LayoutOperation { Action = LayoutActions.SetBold, Target = "fStageName", Bold = true });
+
+    var result = LayoutPlanValidator.Validate(plan, Schema());
+
+    result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+}
+
+[Fact]
+public void Validate_RejectsAddFieldWhoseNewNameCollides()
+{
+    var plan = PlanOf(new LayoutOperation
+    {
+        Action = LayoutActions.AddField, Section = "Section3", NewName = "CustomerName",
+        FieldRef = "{Command.stage_name}",
+        LeftTwips = 0, TopTwips = 20, WidthTwips = 2500, HeightTwips = 260
+    });
+
+    var result = LayoutPlanValidator.Validate(plan, Schema());
+
+    result.IsValid.Should().BeFalse();
+    result.Errors[0].Message.Should().Contain("already exists");
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+```bash
+cd /d/VibeyReports && dotnet test tests/VibeyReports.Contracts.Tests --filter LayoutPlanValidatorTests
+```
+
+Expected: FAIL — `LayoutActions.AddField` and `LayoutOperation.FieldRef` do not exist.
+
+- [ ] **Step 3: Extend `LayoutPlan.cs`**
+
+```csharp
+// in LayoutActions:
+public const string AddField = "addField";
+
+// and append AddField to the All array:
+public static readonly string[] All =
+{
+    Move, Resize, SetFont, SetFontSize, SetBold,
+    SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField
+};
+
+// in LayoutOperation:
+/// <summary>
+/// Bindable field expression for addField, e.g. "{Command.stage_name}".
+/// Must exactly match a ReportSchema.AvailableFields[].FormulaForm.
+/// </summary>
+public string? FieldRef { get; set; }
+```
+
+Note: the existing test `LayoutActions_All_ContainsExactlyTheTenMvpActions` will now fail because
+`All` has eleven entries. Update that test to expect eleven including `addField`, and rename it
+accordingly. This is the one pre-existing test you are authorised to change.
+
+- [ ] **Step 4: Extend `LayoutPlanValidator.cs`**
+
+`addField` joins the `needsSection` set and the add-branch geometry rules, with one extra check.
+
+```csharp
+// widen needsSection:
+var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
+    or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField;
+
+// add AddField to the shared add case label:
+case LayoutActions.AddText:
+case LayoutActions.AddLine:
+case LayoutActions.AddBox:
+case LayoutActions.AddField:
+{
+    // ... existing newName / collision / geometry checks unchanged ...
+
+    if (action == LayoutActions.AddField)
+    {
+        if (string.IsNullOrWhiteSpace(op.FieldRef))
+        {
+            Err("\"addField\" requires \"fieldRef\".");
+            return errs;
+        }
+        if (!availableFieldRefs.Contains(op.FieldRef!))
+        {
+            Err($"\"{op.FieldRef}\" is not a field in this report's data source. " +
+                "Use one of the formulaForm values from the report schema's availableFields.");
+            return errs;
+        }
+    }
+
+    // ... existing bounds checks unchanged ...
+
+    if (errs.Count == 0)
+        objects[op.NewName!] = new SimObject
+        {
+            Section = op.Section!, Kind = KindForAdd(action),
+            Left = l, Top = t, Width = w, Height = h
+        };
+    break;
+}
+```
+
+Build `availableFieldRefs` alongside the other simulation state at the top of `Validate`:
+
+```csharp
+var availableFieldRefs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+foreach (var f in schema.AvailableFields ?? new List<FieldInfo>())
+    if (!string.IsNullOrWhiteSpace(f.FormulaForm)) availableFieldRefs.Add(f.FormulaForm);
+```
+
+and extend the kind helper introduced in the round-1 fixes so an added field is fontable:
+
+```csharp
+private static string KindForAdd(string action) =>
+    action == LayoutActions.AddText  ? "Text"
+  : action == LayoutActions.AddLine  ? "Line"
+  : action == LayoutActions.AddField ? "Field"
+  : "Box";
+```
+
+If the round-1 fix inlined this mapping rather than extracting a helper, add the `AddField` arm
+wherever that mapping lives.
+
+- [ ] **Step 5: Run the validator tests**
+
+```bash
+cd /d/VibeyReports && dotnet test tests/VibeyReports.Contracts.Tests
+```
+
+Expected: PASS, 0 failed. Every pre-existing test must still pass — in particular the F1 regression
+test, which asserts font operations are rejected on `Kind = "Line"`.
+
+- [ ] **Step 6: Write the failing applier test**
+
+Add to `LayoutApplierTests.cs`:
+
+```csharp
+[Fact]
+public void Apply_AddsABoundFieldWhoseDataSourceSurvivesSaveAndReopen()
+{
+    string sectionName;
+    string fieldRef;
+    using (var s = CrystalSession.Open(Fixtures.SampleReport))
+    {
+        var schema = ReportReader.Read(s);
+        sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 260).Name;
+        fieldRef = schema.AvailableFields.First().FormulaForm;
+    }
+
+    var plan = new LayoutPlan
+    {
+        Operations =
+        {
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = sectionName, NewName = "VibeyField",
+                FieldRef = fieldRef,
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 2500, HeightTwips = 240
+            }
+        }
+    };
+
+    var schemaAfter = ApplyAndReread(plan, out var saved);
+    try
+    {
+        var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                               .SingleOrDefault(o => o.Name == "VibeyField");
+        added.Should().NotBeNull();
+        added!.Kind.Should().Be("Field");
+        added.DataSource.Should().Be(fieldRef);
+        added.WidthTwips.Should().Be(2500);
+    }
+    finally { if (File.Exists(saved)) File.Delete(saved); }
+}
+```
+
+If `SampleReport.rpt` turns out to have no Details section at least 260 twips tall, or no available
+fields, switch the fixture to one that does and say which in the report.
+
+- [ ] **Step 7: Run it to verify it fails**
+
+```bash
+cd /d/VibeyReports && dotnet test tests/VibeyReports.CrystalWorker.Tests --filter Apply_AddsABoundField
+```
+
+Expected: FAIL — the applier throws `Unhandled action "addField"`.
+
+- [ ] **Step 8: Extend `LayoutApplier.cs`**
+
+```csharp
+case LayoutActions.AddField:
+    AddField(doc, op);
+    break;
+```
+
+```csharp
+private static void AddField(
+    CrystalDecisions.ReportAppServer.ClientDoc.ISCDReportClientDocument doc,
+    LayoutOperation op)
+{
+    var section = FindSection(doc, op.Section);
+
+    var field = new FieldObjectClass
+    {
+        Name = op.NewName,
+        DataSource = op.FieldRef,
+        Left = op.LeftTwips.Value,
+        Top = op.TopTwips.Value,
+        Width = op.WidthTwips.Value,
+        Height = op.HeightTwips.Value
+    };
+
+    doc.ReportDefController.ReportObjectController.Add(field, section, -1);
+}
+```
+
+- [ ] **Step 9: Run the applier tests**
+
+```bash
+cd /d/VibeyReports && dotnet test tests/VibeyReports.CrystalWorker.Tests
+```
+
+Expected: PASS, 0 failed.
+
+**If `Add` throws because `DataSource` is not resolvable:** the field expression must be bound to a
+field the report's data context actually knows. Confirm `op.FieldRef` came from
+`AvailableFields[].FormulaForm` for THIS report. If direct construction still fails, fall back to
+`ReportObjectController.AddByName(fieldName, headingText)` — call it, then locate the created object
+via `GetAllReportObjects()` and apply the requested position with the existing `ModifyObject`
+helper. Record which path was used in the report; the test's assertions do not change either way.
+
+**If `DataSource` comes back empty after reopen:** the binding did not persist. Do not weaken the
+test — persistence is the one thing `addField` exists to guarantee. Try `AddByName` as above.
+
+- [ ] **Step 10: Update Task 10's `apply_layout` description**
+
+Add `addField` to the tool's supported-actions list and document `fieldRef`:
+
+> `addField` places a bound database field. It takes `section`, `newName`, `fieldRef` and full
+> geometry. `fieldRef` MUST be one of the `formulaForm` values from the schema's `availableFields`
+> — it can only reference fields already in the report's data source, and cannot add tables or
+> change any connection.
+
+If Task 10 is already implemented when this runs, update the `[Description]` attribute in
+`ReportTools.cs` directly.
+
+- [ ] **Step 11: Commit**
+
+```bash
+cd /d/VibeyReports && git add -A && git commit -m "feat: add addField operation for placing bound database fields"
+```
+
+---
+
+## Updated deferred list
+
+`addField` moves OUT of deferred. Still deferred: charts, crosstabs, subreport internals, pictures,
+conditional formatting, formula creation, database/table/connection changes, parameter and grouping
+changes, colour operations, multi-page preview, and the golden-template style library.
