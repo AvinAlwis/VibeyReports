@@ -275,3 +275,33 @@ Also measured: `SubreportFieldName` must name a real sub-report data field. Para
 **Consequence for parameter-driven sub-reports:** the sub-report's result set must *return* the
 column being linked on. If the procedure takes the value only as a parameter and does not select it
 back, no field link can be built and the Designer's Insert Subreport wizard is the fallback.
+
+## A sub-report has two names, and only one of them links (measured 2026-09-01)
+
+`ImportSubreportEx(Name, ...)`'s `Name` argument does **not** become the placed report object's
+`Name`. Crystal auto-numbers the container object itself (`"Subreport1"`, `"Subreport2"`, ...) and
+stores the supplied string as `ISCRSubreportObject.SubreportName`. The two are different strings for
+the same sub-report, and they belong to different name-spaces:
+
+| Name | Read from | Used by |
+|---|---|---|
+| `ro.Name` (`"Subreport1"`) | `GetAllReportObjects()` | `ReportObjectController.Modify/Remove` — so `move`, `resize`, `setAlignment`, `removeObject` |
+| `SubreportName` (`"GoalDetail"`) | `ISCRSubreportObject.SubreportName` | `SubreportController.GetSubreportLinks/SetSubreportLinks/GetSubreport` — so `setSubreportLink` |
+
+Measured against `out/reports/PMSV10_GoalAlignCascade.subreport.rpt`:
+
+- `SetSubreportLinks("Subreport1", ...)` fails with COM **`"This value is write-only."`** — a real,
+  loud failure, not a silent no-op.
+- `SetSubreportLinks("GoalDetail", ...)` succeeds, and the link reads back through
+  `GetSubreportLinks("GoalDetail")` after save/reopen.
+- **Cross-plan linking works.** A sub-report embedded by an earlier save can be linked later, given
+  its `SubreportName`; a second, separate apply against an already-linked file appends and preserves
+  the first link. The earlier claim that only same-plan linking is supported was a consequence of
+  never reporting `SubreportName`, not an SDK limitation.
+- `GetSubreportLinks` returns the real collection whenever links exist, so the append path is not
+  relying on the fallback in practice.
+
+`SubreportController.GetSubreportNames()` is the authority on which names `SetSubreportLinks` will
+accept, and is worth resolving against before the call: it turns an unaddressable name into a
+message that lists what does exist, and canonicalises casing (COM is case-sensitive here; the
+validator is not).

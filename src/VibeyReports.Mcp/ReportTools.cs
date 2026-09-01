@@ -23,9 +23,13 @@ public sealed class ReportTools
         Read a Crystal Reports XI R2 .rpt file and return its layout as JSON: page size and
         margins in twips, every section with its height and backgroundColorHex, and every object
         with its name, kind, position, size, font, alignment, and (where applicable)
-        textColorHex/fillColorHex/lineColorHex/subreportLinks (a Subreport object's list of
-        mainReportFieldName/subreportFieldName/linkedParameterName links, set by
-        apply_layout's setSubreportLink). All colours are "#RRGGBB"; a null colour field
+        textColorHex/fillColorHex/lineColorHex/subreportName/subreportLinks (a Subreport
+        object's own name plus its list of mainReportFieldName/subreportFieldName/
+        linkedParameterName links, set by apply_layout's setSubreportLink). A Subreport's
+        "subreportName" is a DIFFERENT string from its "name": Crystal auto-numbers the placed
+        object ("Subreport1", ...) and keeps the embedded report's own name separately, and
+        setSubreportLink is keyed by subreportName while every other action uses name.
+        All colours are "#RRGGBB"; a null colour field
         means that property has never been explicitly set (not "black" or "white"). Also returns
         availableFields: the database fields the report's data source exposes, each with a
         formulaForm you can pass as fieldRef to apply_layout's addField action. Object and
@@ -74,7 +78,7 @@ public sealed class ReportTools
           setSectionBackground  section, color (any section)
           addSubreport    section, newName, reportPath, leftTwips, topTwips, widthTwips,
                           heightTwips
-          setSubreportLink  target, mainReportField, subreportField, linkedParameter
+          setSubreportLink  target (a subreportName), mainReportField, subreportField
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
@@ -97,19 +101,30 @@ public sealed class ReportTools
         stored procedure or table embeds a sub-report rather than adding a second table to the
         main report. reportPath must be an absolute path to an existing .rpt; the sub-report
         brings its own data source with it, so no addTable/setDataSource step is needed or
-        supported. setSubreportLink wires one of the sub-report's parameters to a main-report
-        field so the sub-report only shows rows relevant to the current main-report row (e.g. the
-        current employee); each linked parameter needs its own setSubreportLink call - a report
-        that needs both an evaluation-cycle link and an employee-number link issues two
-        setSubreportLink operations against the same target, and both survive (links accumulate,
-        they do not replace each other). target for setSubreportLink must be a Subreport object,
-        and MUST be the newName you gave that sub-report in the same plan's own addSubreport
-        operation, not a name read back from a prior read_report - a sub-report's placed object is
-        given an internal, auto-numbered name (e.g. "Subreport1") by Crystal that is DIFFERENT from
-        the name you chose, and setSubreportLink only resolves by the name you chose. Only
-        linking a sub-report added earlier in the SAME plan is supported; setSubreportLink against
-        a sub-report from an earlier apply_layout call or already embedded in the source .rpt is
-        not supported and will fail.
+        supported. reportPath must be ABSOLUTE - a relative path is rejected, because it would
+        otherwise resolve against the report worker process's own working directory.
+        setSubreportLink adds a Crystal FIELD LINK: it filters the sub-report to the rows whose
+        subreportField matches the current main-report row's mainReportField (e.g. the current
+        employee). Both must be real DATA fields - mainReportField a field of the main report,
+        subreportField a field the sub-report's own result set actually RETURNS. It is NOT a way
+        to feed a stored procedure's declared input parameter: parameter-style values for
+        subreportField ("{?x}", "{?@x}", "@x") are all rejected by Crystal as "Invalid field
+        name", and "linkedParameter" is optional and has NO effect - Crystal discards whatever you
+        pass and substitutes its own auto-generated "{?Pm-<mainReportField>}" parameter. If the
+        sub-report's procedure takes a value only as a parameter and never selects it back as a
+        column, no field link can be built at all and the report must be finished in the Crystal
+        Designer instead. Each link needs its own setSubreportLink call - a report needing both an
+        evaluation-cycle link and an employee-number link issues two setSubreportLink operations
+        against the same target, and both survive (links accumulate, they do not replace each
+        other). setSubreportLink's target is a "subreportName", NOT an object "name": use the
+        subreportName read_report reports for an already-embedded sub-report, or the newName you
+        gave an addSubreport earlier in the same plan (which becomes that sub-report's
+        subreportName). Passing the placed object's auto-numbered name (e.g. "Subreport1") is
+        rejected. A sub-report added earlier in the SAME plan can ONLY be targeted by
+        setSubreportLink - move/resize/setAlignment/removeObject against that newName are rejected,
+        because Crystal names the placed object itself and that name is not known until the plan is
+        saved; addSubreport's own leftTwips/topTwips/widthTwips/heightTwips already place it, and a
+        later plan can address it by the name read_report then reports.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.

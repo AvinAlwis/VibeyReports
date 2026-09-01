@@ -47,6 +47,26 @@ public class LayoutPlanValidatorTests
         }
     };
 
+    /// <summary>
+    /// Schema() plus a sub-report ALREADY embedded in the report, shaped exactly as ReportReader
+    /// emits one (measured against out/reports/PMSV10_GoalAlignCascade.subreport.rpt): the placed
+    /// object's Name is Crystal's own auto-numbered "Subreport1", while the sub-report's own name
+    /// -- the only string setSubreportLink resolves by -- is the separate SubreportName.
+    /// Kept out of Schema() so the shared fixture's object counts stay as every other test found
+    /// them.
+    /// </summary>
+    private static ReportSchema SchemaWithEmbeddedSubreport()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "Subreport1", Kind = "Subreport", SubreportName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300,
+            SubreportLinks = new System.Collections.Generic.List<SubreportLinkInfo>()
+        });
+        return schema;
+    }
+
     private static LayoutPlan PlanOf(params LayoutOperation[] ops) =>
         new LayoutPlan { PlanVersion = 1, Operations = { } }.With(ops);
 
@@ -759,8 +779,34 @@ public class LayoutPlanValidatorTests
         result.Errors[0].Message.Should().Contain("mainReportField");
     }
 
+    /// <summary>
+    /// A sub-report is not fontable. Targeted through the ALREADY-EMBEDDED sub-report's placed
+    /// object name, which is the only way this rule is reachable on its own: a sub-report added by
+    /// the same plan is now stopped one step earlier, by F1's gate (see the test below), so
+    /// pointing this at one would assert the wrong rule's message.
+    /// </summary>
     [Fact]
     public void Validate_RejectsSetFontSizeOnASubreport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetFontSize, Target = "Subreport1", FontSizePt = 10f
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("has no font to change");
+    }
+
+    /// <summary>
+    /// F1 again, for a font operation: setFontSize resolves through LayoutApplier.FindObject just
+    /// like move/resize do, so a same-plan sub-report must be stopped by the identity gate rather
+    /// than reach the applier. Both rules reject it; only this one explains why the name does not
+    /// resolve.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetFontSizeOnASubreportAddedEarlierInTheSamePlan()
     {
         var plan = PlanOf(
             new LayoutOperation
@@ -774,7 +820,233 @@ public class LayoutPlanValidatorTests
         var result = LayoutPlanValidator.Validate(plan, Schema());
 
         result.IsValid.Should().BeFalse();
-        result.Errors[0].Message.Should().Contain("has no font to change");
+        result.Errors[0].Message.Should().Contain("added earlier in this same plan");
+    }
+
+    // --- review round 3: the SubreportName/Name identity split ---
+
+    /// <summary>
+    /// F1. Before the fix this plan validated CLEAN: the added sub-report was registered under
+    /// newName, so "move GoalDetail" resolved against the simulation happily. At apply time
+    /// operation 0 was written to the LIVE document, then operation 1 threw from
+    /// LayoutApplier.FindObject -- which matches on the report object's own Name, and Crystal had
+    /// named the placed object "Subreport1", not "GoalDetail". That faulted the session and lost
+    /// the whole plan, addSubreport included. It must be rejected before anything is written, and
+    /// the message must give the reason (Crystal names the object itself) rather than a bare
+    /// "does not exist", which would send the agent hunting for a typo it did not make.
+    /// </summary>
+    [Theory]
+    [InlineData(LayoutActions.Move)]
+    [InlineData(LayoutActions.Resize)]
+    [InlineData(LayoutActions.RemoveObject)]
+    [InlineData(LayoutActions.SetAlignment)]
+    public void Validate_RejectsNonLinkOperationsAgainstASubreportAddedEarlierInTheSamePlan(string action)
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = action, Target = "GoalDetail",
+                LeftTwips = 10, TopTwips = 10, WidthTwips = 100, HeightTwips = 100, Alignment = "Left"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("added earlier in this same plan")
+              .And.Contain("auto-numbered")
+              .And.Contain("Only setSubreportLink");
+    }
+
+    /// <summary>
+    /// F1's counterpart: the gate must not cost the normal usage anything. setSubreportLink is the
+    /// one action that CAN address a same-plan sub-report by newName, because SetSubreportLinks is
+    /// keyed by SubreportName rather than by the report object. Verified live against the real
+    /// worker (addSubreport + setSubreportLink in one plan, ok:true).
+    /// </summary>
+    [Fact]
+    public void Validate_StillAcceptsSetSubreportLinkAgainstASubreportAddedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+                SubreportField = "{sp_goal_detail;1.goal_id}"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F2, the finding that matters most: linking a sub-report that is ALREADY embedded -- put
+    /// there by an earlier apply_layout call, or present in the source .rpt from the start. Before
+    /// the fix this was impossible to express at all: read_report never reported SubreportName, so
+    /// the only sub-report name the agent could see was the placed object's ("Subreport1"), which
+    /// setSubreportLink cannot resolve. Verified end-to-end against the real worker and
+    /// out/reports/PMSV10_GoalAlignCascade.subreport.rpt: ok:true, and the link reads back.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkAgainstASubreportAlreadyEmbeddedInTheReport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F2. The single likeliest mistake now that both names are visible: passing the object "name"
+    /// where the "subreportName" belongs. Measured: that reaches SetSubreportLinks and fails with
+    /// COM "This value is write-only." -- true, loud, and useless. Catch it in the validator and
+    /// name the string that would have worked.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkTargetingTheSubreportsPlacedObjectNameAndNamesTheRightOne()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "Subreport1",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("placed object name")
+              .And.Contain("subreportName")
+              .And.Contain("\"GoalDetail\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkAgainstAnUnknownSubreportName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "NoSuchSubreport",
+            MainReportField = "{sp_x;1.a}", SubreportField = "{sp_y;1.a}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("No sub-report named \"NoSuchSubreport\"");
+    }
+
+    /// <summary>
+    /// F5. newName uniqueness was checked against the report OBJECT names only, so an addSubreport
+    /// named for a sub-report the report already embeds collided invisibly -- and setSubreportLink,
+    /// which resolves through that same name-space, would then have two candidates and no way to
+    /// say which was meant. Verified live: rejected with this message.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseNewNameCollidesWithAnAlreadyEmbeddedSubreportName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("already embedded");
+    }
+
+    /// <summary>
+    /// Removing a sub-report's placed container object takes the embedded sub-report with it, so a
+    /// later setSubreportLink against its SubreportName must stop resolving. (removeObject targets
+    /// the object name, which is legal here because this sub-report was embedded by an earlier
+    /// plan, not by this one.)
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkAgainstASubreportRemovedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Subreport1" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_x;1.a}", SubreportField = "{sp_y;1.a}"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("No sub-report named \"GoalDetail\"");
+    }
+
+    /// <summary>
+    /// F4. linkedParameter is optional because it has no effect: measured against the installed
+    /// 11.5 RAS, Crystal discards whatever LinkedParameterName is written and substitutes its own
+    /// "{?Pm-&lt;mainReportField&gt;}". Requiring a value only invited the agent to invent a stored
+    /// procedure parameter name and believe it had been wired up. Verified live: a plan omitting it
+    /// entirely applies ok:true and reads back the Pm- substitution.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkWithNoLinkedParameter()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}",
+            LinkedParameter = null
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F7. The tool contract promises an absolute reportPath and nothing checked it, so a relative
+    /// path silently resolved against the WORKER process's working directory -- a path the agent
+    /// has no visibility of, making even the applier's "file not found" message name something the
+    /// agent never wrote. Path.IsPathRooted is pure string arithmetic, so this stays a validator
+    /// rule and the validator stays free of file I/O.
+    /// </summary>
+    [Theory]
+    [InlineData(@"reports\GoalDetail.rpt")]
+    [InlineData("GoalDetail.rpt")]
+    [InlineData("./GoalDetail.rpt")]
+    public void Validate_RejectsAddSubreportWithARelativeReportPath(string reportPath)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = reportPath,
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("must be an absolute path");
     }
 
     // --- removeObject ---

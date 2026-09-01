@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace VibeyReports.Contracts;
@@ -54,13 +55,30 @@ public static class LayoutPlanValidator
             sectionHeights[s.Name] = s.HeightTwips;
 
         var objects = new Dictionary<string, SimObject>(StringComparer.OrdinalIgnoreCase);
+
+        // F2: a Subreport lives in TWO name-spaces at once. The placed container object carries
+        // ro.Name ("Subreport1", auto-numbered by Crystal), which is what every geometry/format
+        // operation targets; the embedded sub-report itself carries SubreportName, which is the
+        // ONLY name SubreportController.GetSubreportLinks/SetSubreportLinks -- and therefore
+        // setSubreportLink -- resolve by. Keeping a second map means setSubreportLink can be
+        // validated against the right name-space, so linking a sub-report embedded by an EARLIER
+        // plan (or already present in the source .rpt) works, instead of being unreachable.
+        var subreportsByName = new Dictionary<string, SimObject>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var s in sections)
             foreach (var o in s.Objects)
-                objects[o.Name] = new SimObject
+            {
+                var sim = new SimObject
                 {
                     Section = s.Name, Left = o.LeftTwips, Top = o.TopTwips,
-                    Width = o.WidthTwips, Height = o.HeightTwips, Kind = o.Kind
+                    Width = o.WidthTwips, Height = o.HeightTwips, Kind = o.Kind,
+                    SubreportName = o.SubreportName
                 };
+                objects[o.Name] = sim;
+                if (string.Equals(o.Kind, "Subreport", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(o.SubreportName))
+                    subreportsByName[o.SubreportName!] = sim;
+            }
 
         // removeObject tracking: names removed earlier in this plan give a specific "removed by
         // this plan" message instead of the generic "does not exist" one a target that never
@@ -89,7 +107,7 @@ public static class LayoutPlanValidator
                 continue;
             }
 
-            var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight, availableFieldRefs, removedByPlan);
+            var errors = ValidateOne(op, i, objects, subreportsByName, sectionHeights, printableWidth, printableHeight, availableFieldRefs, removedByPlan);
             result.Errors.AddRange(errors);
         }
 
@@ -100,6 +118,7 @@ public static class LayoutPlanValidator
     private static List<ValidationError> ValidateOne(
         LayoutOperation op, int index,
         Dictionary<string, SimObject> objects,
+        Dictionary<string, SimObject> subreportsByName,
         Dictionary<string, int> sectionHeights,
         int printableWidth, int printableHeight,
         HashSet<string> availableFieldRefs,
@@ -118,8 +137,10 @@ public static class LayoutPlanValidator
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
             or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment
             or LayoutActions.RemoveObject
-            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor
-            or LayoutActions.SetSubreportLink;
+            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor;
+        // F2: setSubreportLink is deliberately NOT in needsTarget -- its target is resolved
+        // against subreportsByName (the SubreportName name-space), not `objects` (the report
+        // object name-space). Resolving it here would look the name up in the wrong namespace.
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
             or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField
             or LayoutActions.SetSectionBackground or LayoutActions.AddSubreport;
@@ -133,6 +154,26 @@ public static class LayoutPlanValidator
                 Err(removedByPlan.Contains(op.Target!)
                     ? $"Object \"{op.Target}\" was removed earlier in this plan."
                     : $"Object \"{op.Target}\" does not exist in the report.");
+                return errs;
+            }
+
+            // F1: a sub-report added earlier in THIS plan is registered under addSubreport's
+            // newName, but Crystal never gives the placed object that name -- it auto-numbers the
+            // container itself ("Subreport1", "Subreport2", ...) at import time, and every
+            // operation below resolves through LayoutApplier.FindObject, which matches on the
+            // object's own Name. Letting these through would validate clean, apply the
+            // addSubreport to the live document, then throw "was not found" on the next
+            // operation, faulting the session and losing the whole plan. Reject here, with the
+            // reason, while nothing has been written.
+            if (target!.AddedInPlan && string.Equals(target.Kind, "Subreport", StringComparison.OrdinalIgnoreCase))
+            {
+                Err($"\"{action}\" cannot target \"{op.Target}\": that is the newName of a sub-report " +
+                    "added earlier in this same plan, and Crystal gives the placed sub-report object its own " +
+                    "auto-numbered name (e.g. \"Subreport1\") at import time, so no object by that name exists " +
+                    "to operate on. addSubreport already places the sub-report at the leftTwips/topTwips/" +
+                    "widthTwips/heightTwips you gave it, so no geometry is lost; to move, resize, realign or " +
+                    "remove it afterwards, run a second plan against the saved report and use the object name " +
+                    "read_report reports for it. Only setSubreportLink can address a sub-report by this name.");
                 return errs;
             }
         }
@@ -265,6 +306,13 @@ public static class LayoutPlanValidator
             {
                 if (string.IsNullOrWhiteSpace(op.NewName)) { Err($"\"{action}\" requires \"newName\"."); return errs; }
                 if (objects.ContainsKey(op.NewName!)) { Err($"An object named \"{op.NewName}\" already exists in the report."); return errs; }
+                // F5: addSubreport's newName lands in the SubreportName name-space, not the
+                // report-object one, so the check above looks at the wrong set for it. A source
+                // report that already embeds a sub-report named "GoalDetail" would otherwise
+                // collide invisibly -- and setSubreportLink, which resolves through that same
+                // name-space, could then no longer say which of the two it meant.
+                if (action == LayoutActions.AddSubreport && subreportsByName.ContainsKey(op.NewName!))
+                { Err($"A sub-report named \"{op.NewName}\" is already embedded in this report."); return errs; }
                 if (action == LayoutActions.AddText && string.IsNullOrEmpty(op.Text)) Err("\"addText\" requires \"text\".");
 
                 if (action == LayoutActions.AddField)
@@ -296,6 +344,18 @@ public static class LayoutPlanValidator
                         Err($"\"reportPath\" must end in \".rpt\"; got \"{op.ReportPath}\".");
                         return errs;
                     }
+                    // F7: the tool contract promises an absolute path, and nothing checked it. A
+                    // relative path is not an error the applier can report usefully either -- it
+                    // resolves against the WORKER process's working directory, which the agent has
+                    // no visibility of, so "file not found" would name a path the agent never
+                    // wrote. Path.IsPathRooted is pure string arithmetic (no file I/O), so it
+                    // belongs here beside the suffix check rather than in the applier.
+                    if (!Path.IsPathRooted(op.ReportPath!))
+                    {
+                        Err($"\"reportPath\" must be an absolute path; got \"{op.ReportPath}\", which would be " +
+                            "resolved against the worker process's own working directory.");
+                        return errs;
+                    }
                 }
 
                 if (op.LeftTwips is null || op.TopTwips is null || op.WidthTwips is null || op.HeightTwips is null)
@@ -324,11 +384,22 @@ public static class LayoutPlanValidator
 
                 if (errs.Count == 0)
                 {
-                    objects[op.NewName!] = new SimObject
+                    var added = new SimObject
                     {
                         Section = op.Section!, Left = l, Top = t, Width = w, Height = h,
-                        Kind = KindForAdd(action)
+                        Kind = KindForAdd(action), AddedInPlan = true
                     };
+                    objects[op.NewName!] = added;
+                    // F1/F2: registering the added sub-report in BOTH maps keeps newName
+                    // uniqueness honest against later adds, while AddedInPlan makes every
+                    // non-setSubreportLink operation on it fail at validation time with the
+                    // reason (see the needsTarget block above). Only setSubreportLink, which
+                    // resolves through this second map, can address it.
+                    if (action == LayoutActions.AddSubreport)
+                    {
+                        added.SubreportName = op.NewName;
+                        subreportsByName[op.NewName!] = added;
+                    }
                 }
                 break;
             }
@@ -338,23 +409,60 @@ public static class LayoutPlanValidator
                 // block above. Deleting the entry frees the name for a later addText/addLine/
                 // addBox/addField, and drops it from any section-height shrink check that runs
                 // afterwards since that check only walks what remains in `objects`.
+                // F2: removing a Subreport's container object takes the embedded sub-report with
+                // it, so drop it from the SubreportName map too -- otherwise a later
+                // setSubreportLink would still resolve against a sub-report this plan deleted.
+                if (!string.IsNullOrWhiteSpace(target!.SubreportName)) subreportsByName.Remove(target.SubreportName!);
                 objects.Remove(op.Target!);
                 removedByPlan.Add(op.Target!);
                 break;
 
             case LayoutActions.SetSubreportLink:
-                // Target existence was already checked by the shared needsTarget block above.
-                // Linking a non-Subreport object (a Text object, say) is a plan error worth
-                // catching here rather than surfacing as a confusing COMException later.
-                if (target!.Kind != "Subreport")
+            {
+                // F2: resolved against subreportsByName, NOT `objects`. SetSubreportLinks is keyed
+                // by the sub-report's own SubreportName; the placed container object's Name is a
+                // different, Crystal-auto-numbered string, and passing it through fails at the COM
+                // boundary with the unhelpful "This value is write-only." (measured). This map
+                // holds both sub-reports already embedded in the source .rpt (so cross-plan
+                // linking works) and any added earlier in this same plan.
+                if (string.IsNullOrWhiteSpace(op.Target)) { Err("\"setSubreportLink\" requires \"target\"."); return errs; }
+
+                if (!subreportsByName.ContainsKey(op.Target!))
                 {
-                    Err($"Object \"{op.Target}\" is a {target.Kind}, not a Subreport, and cannot take a subreport link.");
-                    break;
+                    // The single most likely mistake, and the one whose default message is most
+                    // misleading: the agent passed the object Name from read_report instead of the
+                    // subreportName beside it. Say so, and name the string that would have worked.
+                    if (objects.TryGetValue(op.Target!, out var byObjectName)
+                        && string.Equals(byObjectName.Kind, "Subreport", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(byObjectName.SubreportName))
+                    {
+                        Err($"\"{op.Target}\" is the placed object name of a sub-report, which setSubreportLink " +
+                            $"cannot resolve. Use its \"subreportName\" instead: \"{byObjectName.SubreportName}\".");
+                    }
+                    else if (objects.TryGetValue(op.Target!, out var other))
+                    {
+                        Err($"Object \"{op.Target}\" is a {other.Kind}, not a Subreport, and cannot take a subreport link.");
+                    }
+                    else
+                    {
+                        Err(removedByPlan.Contains(op.Target!)
+                            ? $"Sub-report \"{op.Target}\" was removed earlier in this plan."
+                            : $"No sub-report named \"{op.Target}\" is embedded in this report. " +
+                              "Use a Subreport object's \"subreportName\" from read_report, or the \"newName\" " +
+                              "of an addSubreport earlier in this plan.");
+                    }
+                    return errs;
                 }
+
                 if (string.IsNullOrWhiteSpace(op.MainReportField)) Err("\"setSubreportLink\" requires \"mainReportField\".");
                 if (string.IsNullOrWhiteSpace(op.SubreportField)) Err("\"setSubreportLink\" requires \"subreportField\".");
-                if (string.IsNullOrWhiteSpace(op.LinkedParameter)) Err("\"setSubreportLink\" requires \"linkedParameter\".");
+                // F4: "linkedParameter" is deliberately OPTIONAL. Measured against the installed
+                // 11.5 RAS: Crystal DISCARDS whatever LinkedParameterName is written and
+                // substitutes its own "{?Pm-<mainReportField>}". Requiring a value with no effect
+                // only invites the agent to invent a stored-procedure parameter name and believe
+                // it was wired up. See docs/sdk-notes.md.
                 break;
+            }
 
             case LayoutActions.ResizeSection:
             {
@@ -419,5 +527,15 @@ public static class LayoutPlanValidator
         public string Section = "";
         public string Kind = "";
         public int Left, Top, Width, Height;
+
+        /// <summary>Kind == "Subreport" only: the sub-report's own name, setSubreportLink's key.</summary>
+        public string? SubreportName;
+
+        /// <summary>
+        /// True for an object this plan adds. Only consulted for Subreport, where the name the
+        /// plan chose is never the name Crystal gives the placed object -- see F1 in the
+        /// needsTarget block.
+        /// </summary>
+        public bool AddedInPlan;
     }
 }

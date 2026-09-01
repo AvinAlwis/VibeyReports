@@ -96,10 +96,16 @@ public class ReportToolsTests
 
             var readJson = await Tools().ReadReport(dest, CancellationToken.None);
             readJson.Should().Contain("subreportLinks");
+            // F2: subreportName must reach the agent over the wire too. It is the ONLY name
+            // setSubreportLink resolves by, and it is a different string from the object's "name",
+            // so without it in this JSON an already-embedded sub-report cannot be linked at all.
+            readJson.Should().Contain("subreportName");
 
             var readSchema = JsonSerializer.Deserialize<ReportSchema>(readJson, VibeyJson.Options)!;
             var sub = readSchema.Sections.SelectMany(s => s.Objects)
                 .Single(o => o.Kind == "Subreport" && o.LeftTwips == 200 && o.TopTwips == 30);
+            sub.SubreportName.Should().Be("McpLinkedSubreport");
+            sub.Name.Should().NotBe("McpLinkedSubreport");
             sub.SubreportLinks.Should().NotBeNull();
             sub.SubreportLinks!.Should().ContainSingle();
             sub.SubreportLinks[0].MainReportFieldName.Should().Be(mainField);

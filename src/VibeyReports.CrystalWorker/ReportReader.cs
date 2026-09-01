@@ -152,6 +152,11 @@ namespace VibeyReports.CrystalWorker
                     // SubreportController.GetSubreportLinks/SetSubreportLinks are keyed by. Using
                     // ro.Name here (the container name) would ask GetSubreportLinks for a name
                     // that was never registered as a sub-report and silently read back nothing.
+                    // F2: that split identity is exactly what setSubreportLink's target needs, so
+                    // report it instead of consuming it privately here. Without this the agent can
+                    // see only ro.Name -- the one name setSubreportLink does NOT accept -- and
+                    // linking an already-embedded sub-report is impossible to express.
+                    info.SubreportName = subreport.SubreportName ?? "";
                     info.SubreportLinks = ReadSubreportLinks(doc, subreport.SubreportName);
                     break;
             }

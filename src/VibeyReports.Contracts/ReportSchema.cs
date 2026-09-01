@@ -38,7 +38,11 @@ public sealed class SectionInfo
 
 public sealed class ObjectInfo
 {
-    /// <summary>RAS object name. Unique within the report. Used as the operation target.</summary>
+    /// <summary>
+    /// RAS object name. Unique within the report. The target for every operation EXCEPT
+    /// setSubreportLink, which is keyed by <see cref="SubreportName"/> instead -- see that
+    /// property for why the two are different strings for a Subreport object.
+    /// </summary>
     public string Name { get; set; } = "";
     /// <summary>Field, Text, Line, Box, Subreport, Picture, Chart, Crosstab, FieldHeading, Other.</summary>
     public string Kind { get; set; } = "";
@@ -66,6 +70,14 @@ public sealed class ObjectInfo
     public string? FillColorHex { get; set; }
     /// <summary>"#RRGGBB" outline colour for Line/Box objects; null when not applicable.</summary>
     public string? LineColorHex { get; set; }
+
+    /// <summary>
+    /// Populated only for Kind == "Subreport". Null otherwise. The embedded sub-report's OWN
+    /// name, which is a different string from <see cref="Name"/>: Crystal auto-numbers the placed
+    /// container object ("Subreport1", "Subreport2", ...) and stores the name the sub-report was
+    /// imported under here. setSubreportLink is keyed by THIS name, not by <see cref="Name"/>.
+    /// </summary>
+    public string? SubreportName { get; set; }
 
     /// <summary>Populated only for Kind == "Subreport". Null otherwise.</summary>
     public List<SubreportLinkInfo>? SubreportLinks { get; set; }

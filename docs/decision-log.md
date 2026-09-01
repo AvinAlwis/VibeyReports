@@ -918,3 +918,111 @@ FluentAssertions 7.x (last Apache-2.0 release, near-identical API) or migrate to
 
 Note the same version is used by `D:\PHR-X-DB-MCP-SERVER` in both of its test projects, so any future
 change likely applies there too.
+
+---
+
+## Sub-report review round 3 (2026-09-01) — the SubreportName/Name identity split
+
+An independent review of `c21005e` found seven issues in `addSubreport`/`setSubreportLink`. All
+seven were fixed. The rulings below record the ones that were judgement calls, plus one prediction
+in the review that direct measurement contradicted.
+
+### The review's one wrong prediction: there was no silent-corruption path
+
+The review predicted that `setSubreportLink` against a **pre-existing** sub-report would be a
+"silent no-op reported as `ok:true`" — i.e. data loss. Measured directly against
+`out/reports/PMSV10_GoalAlignCascade.subreport.rpt` (which embeds a sub-report with object
+`Name = "Subreport1"` and `SubreportName = "GoalDetail"`), before any fix:
+
+- `target = "Subreport1"` passed the validator, then failed **loudly** in the applier with COM
+  `"This value is write-only."`, reported as `ok:false`.
+- `target = "GoalDetail"` was rejected by the validator: `Object "GoalDetail" does not exist in the
+  report.`
+
+So nothing was ever silently corrupted. The flaw was real but was a **usability/correctness** flaw:
+cross-plan linking was impossible to express, and both failure modes named the wrong cause. It has
+been fixed as such, and the fix makes cross-plan linking actually work rather than documenting the
+limitation away.
+
+### Ruling 1 — a Subreport is addressable by two different names, and both are now reported
+
+`ObjectInfo.Name` is the placed container object's name, which Crystal auto-numbers
+(`"Subreport1"`); `ObjectInfo.SubreportName` is the embedded report's own name, which is what
+`SubreportController.GetSubreportLinks`/`SetSubreportLinks` — and therefore `setSubreportLink` — are
+keyed by. `ReportReader` already read `SubreportName` and threw it away, leaving the agent able to
+see only the one name `setSubreportLink` does *not* accept.
+
+**Ruling:** report both. `SubreportName` is now on `ObjectInfo`, in `read_report`'s JSON, and in the
+tool description. `LayoutPlanValidator` keeps a second map (`SubreportName -> SimObject`) and
+resolves `setSubreportLink`'s target through it, so every other action stays on the object-name
+map. **Verified end-to-end** through the real worker against
+`PMSV10_GoalAlignCascade.subreport.rpt`: `read_report` reports
+`name="Subreport1", subreportName="GoalDetail"`; a plan whose only operation is a
+`setSubreportLink` on `"GoalDetail"` applies `ok:true`; the saved report reads back exactly one
+link. A second apply against *that* output appends a second link and keeps the first.
+
+`SubreportController.GetSubreportNames()` — present on the SDK surface but unused — is now the
+applier's guard: `setSubreportLink`'s target is resolved against it (which also canonicalises
+casing, since the validator matches case-insensitively and COM does not), so an unaddressable name
+produces a message naming the sub-reports that do exist instead of COM's "This value is write-only."
+
+### Ruling 2 — a sub-report added in the same plan can ONLY be targeted by `setSubreportLink`
+
+`[addSubreport newName="GoalDetail", move target="GoalDetail"]` used to validate clean, apply
+operation 0 to the **live** document, then throw at operation 1 from `LayoutApplier.FindObject`
+(which matches on the object's own `Name`, and Crystal had named the object `"Subreport1"`). That
+faulted the session and lost the entire plan, `addSubreport` included.
+
+Two fixes were open: kind-gate every non-`setSubreportLink` action against `"Subreport"`, or
+register the sim entry so only `setSubreportLink` resolves it.
+
+**Ruling: a third, narrower option** — register the added sub-report in **both** maps and flag it
+`AddedInPlan`, then reject any non-`setSubreportLink` target operation on it in the shared
+`needsTarget` block. This keeps `newName` uniqueness honest against later adds (which a
+register-in-one-map-only approach would lose) and, unlike a bare kind gate, does not forbid
+`move`/`resize`/`removeObject` on a sub-report that is *already* embedded — those are legitimate and
+work, because there the object name is real and known.
+
+The rejection message names the actual cause (Crystal assigns the placed object its own
+auto-numbered name at import time) and states that nothing is lost: `ImportSubreportEx` already
+receives the geometry at add time, and a second plan can address the object by the name
+`read_report` then reports. Verified live: the message is what the worker returns.
+
+### Ruling 3 — `linkedParameter` is now optional, because it has no effect
+
+`docs/sdk-notes.md` records (measured) that Crystal **discards** `LinkedParameterName` and
+substitutes its own `{?Pm-<mainReportField>}`. The tool description nevertheless told the agent that
+`setSubreportLink` "wires one of the sub-report's parameters to a main-report field".
+
+**Ruling:** requiring a value that provably has no effect only invites the agent to invent a stored
+procedure parameter name and believe it was wired up. `linkedParameter` is now optional in the
+validator, and the tool description states plainly that Crystal substitutes its own parameter, that
+`setSubreportLink` is a **field link only** and cannot target a stored procedure's declared
+parameter, and that `subreportField` must be a real sub-report **data** field — parameter forms
+(`{?x}`, `{?@x}`, bare `@x`) are all rejected by Crystal with "Invalid field name" (measured).
+Verified live: a plan omitting `linkedParameter` entirely applies `ok:true` and reads back the
+`{?Pm-...}` substitution.
+
+### Ruling 4 — the `COMException` tolerance must prove it discarded nothing
+
+`SetSubreportLinks` replaces the whole collection. The applier caught **any** `COMException` from
+`GetSubreportLinks` and started from a fresh collection, which would turn an append into a replace
+and report success. (It also called `links.Add` on a possibly-`null` result, where a
+`NullReferenceException` would escape the `COMException`-typed catch.)
+
+**Ruling:** keep the tolerance — a link-less sub-report genuinely may throw rather than return an
+empty collection — but make it carry a proof obligation. `null` is folded into the same "could not
+read" path, and whenever that path is taken the links are **re-read after the set and required to
+number exactly one**. More than one means real links were discarded; a read-back that itself fails
+means it cannot be shown they were not. Either way the operation throws, and the session's fault
+handling means the report is never saved. Nothing silently succeeds on unproven ground.
+
+### Ruling 5 — `reportPath` absoluteness belongs in the validator, not the applier
+
+The tool contract promised an absolute path and nothing checked it, so a relative path resolved
+against the **worker process's** working directory — which the agent cannot see, making even the
+applier's "file not found" message name a path the agent never wrote.
+
+**Ruling:** `Path.IsPathRooted` is pure string arithmetic with no file I/O, so it sits beside the
+`.rpt` suffix check in the validator without breaking the "validator does no file I/O" rule. The
+*existence* check stays in the applier, as before.

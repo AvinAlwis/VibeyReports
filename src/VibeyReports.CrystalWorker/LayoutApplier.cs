@@ -666,8 +666,14 @@ namespace VibeyReports.CrystalWorker
         /// the second call silently discard the first. So this fetches the sub-report's current
         /// links first, appends the new one, and only then calls SetSubreportLinks with the whole
         /// (now-longer) collection. GetSubreportLinks is wrapped defensively: a sub-report with no
-        /// links yet may throw rather than return an empty collection, in which case this starts
-        /// from a fresh SubreportLinksClass instead of failing the whole operation.
+        /// links yet may throw (or return null) rather than return an empty collection, in which
+        /// case this starts from a fresh SubreportLinksClass instead of failing the whole
+        /// operation. F3: that tolerance is NARROW by construction -- starting fresh is only
+        /// correct when there was genuinely nothing to preserve, so whenever the fallback is used
+        /// the links are re-read after the set and required to number exactly one. Anything else
+        /// (more links present, or a read-back that fails) means the fallback may have replaced
+        /// real links with a single new one, and that must surface as a failed operation rather
+        /// than as silent data loss reported ok.
         /// </summary>
         private static void SetSubreportLink(
             ISCDReportClientDocument doc,
@@ -683,22 +689,40 @@ namespace VibeyReports.CrystalWorker
             // for setSubreportLink is addSubreport's newName -- the SubreportName -- and must be
             // used as-is here, NOT resolved through FindObject(doc, op.Target), which looks up by
             // the (different, auto-assigned) container object Name and would throw "was not
-            // found" for a sub-report added earlier in this same plan. See ReportReader's matching
-            // fix (ISCRSubreportObject.SubreportName, not ro.Name) for the read-back side of the
-            // same split identifier.
-            var subreportName = op.Target!;
+            // found" for a sub-report added earlier in this same plan. ReportReader now REPORTS
+            // that SubreportName on ObjectInfo, so the agent can also target a sub-report embedded
+            // by an earlier plan or already present in the source .rpt -- not only one added in
+            // this same plan.
+            var subreportName = op.Target;
 
             // GetSubreportLinks/SetSubreportLinks are COM-typed to the marker interface
             // SubreportLinks, but Add/Count/Item live on the "ISCR" dual interface the same
             // concrete SubreportLinksClass also implements -- verified by reflecting the
             // installed 11.5 ReportDefModel assembly. Cast to reach them.
-            ISCRSubreportLinks links;
+            // F3 guard: resolve the name against the controller's own registry FIRST. Passing a
+            // name SubreportController does not know (the placed object's auto-numbered Name, say)
+            // otherwise reaches SetSubreportLinks and fails with COM "This value is write-only."
+            // -- measured, and useless to the agent. This also canonicalises the casing, since the
+            // validator matches names case-insensitively but the COM API does not.
+            subreportName = ResolveSubreportName(doc, subreportName, op.Target);
+
+            var readFailed = false;
+            ISCRSubreportLinks links = null;
             try
             {
                 links = (ISCRSubreportLinks)doc.SubreportController.GetSubreportLinks(subreportName);
             }
             catch (COMException)
             {
+                readFailed = true;
+            }
+
+            // F3: null is a real possibility here, not just a throw -- and links.Add below would
+            // then raise a bare NullReferenceException the COMException catch above cannot see.
+            // Fold it into the same "could not read" path so it gets the same proof obligation.
+            if (links == null)
+            {
+                readFailed = true;
                 links = new SubreportLinksClass();
             }
 
@@ -718,6 +742,63 @@ namespace VibeyReports.CrystalWorker
                 throw new InvalidOperationException(
                     $"Crystal rejected \"setSubreportLink\" for \"{op.Target}\": {ex.Message.Trim()}", ex);
             }
+
+            // F3: SetSubreportLinks REPLACES the whole collection. If the read above failed and we
+            // started from an empty collection, any links the sub-report already had have just
+            // been thrown away -- silently, and reported as success. Tolerating that throw is only
+            // safe when the sub-report genuinely had no links, so prove it: re-read and require
+            // exactly the one link we appended. A count of more than one means the fallback was
+            // wrong and existing links were discarded; a re-read that itself fails means we cannot
+            // tell, which is not good enough to report ok.
+            if (!readFailed) return;
+
+            int afterCount;
+            try
+            {
+                var after = (ISCRSubreportLinks)doc.SubreportController.GetSubreportLinks(subreportName);
+                if (after == null) throw new InvalidOperationException("GetSubreportLinks returned null.");
+                afterCount = after.Count;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"\"setSubreportLink\" for \"{op.Target}\": this sub-report's existing links could not be read " +
+                    "before the link was added, and cannot be read back afterwards to confirm none were discarded " +
+                    $"(SetSubreportLinks replaces the whole collection): {ex.Message.Trim()}", ex);
+            }
+
+            if (afterCount != 1)
+                throw new InvalidOperationException(
+                    $"\"setSubreportLink\" for \"{op.Target}\": this sub-report's existing links could not be read " +
+                    $"before the link was added, so it was set from an empty collection, but {afterCount} links are " +
+                    "present afterwards -- pre-existing links may have been discarded. The report was not saved.");
+        }
+
+        /// <summary>
+        /// Maps setSubreportLink's target onto the exact name SubreportController is keyed by,
+        /// using the (previously unused) GetSubreportNames registry. The validator already checks
+        /// the name against the schema's subreportName values, so a miss here means the document
+        /// and the schema disagree -- worth a message that lists what does exist rather than a raw
+        /// COM failure.
+        /// </summary>
+        private static string ResolveSubreportName(
+            ISCDReportClientDocument doc, string requested, string reportedTarget)
+        {
+            var names = doc.SubreportController.GetSubreportNames();
+            var known = new List<string>();
+            for (var i = 0; i < names.Count; i++)
+            {
+                var name = names[i] as string ?? names[i]?.ToString() ?? "";
+                known.Add(name);
+                if (string.Equals(name, requested, StringComparison.OrdinalIgnoreCase)) return name;
+            }
+
+            throw new InvalidOperationException(
+                $"\"setSubreportLink\": \"{reportedTarget}\" is not a sub-report in this report. " +
+                (known.Count == 0
+                    ? "The report embeds no sub-reports."
+                    : $"Embedded sub-reports: {string.Join(", ", known)}.") +
+                " Use a Subreport object's \"subreportName\" from read_report, not its object \"name\".");
         }
     }
 }

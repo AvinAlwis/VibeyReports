@@ -1158,9 +1158,184 @@ public class LayoutApplierTests
                 .SingleOrDefault(o => o.Kind == "Subreport" && o.LeftTwips == 100 && o.TopTwips == 20
                                        && o.WidthTwips == 3000 && o.HeightTwips == 300);
             added.Should().NotBeNull();
-            added!.Kind.Should().Be("Subreport");
+
+            // F6: asserting added.Kind == "Subreport" here could never fail -- the LINQ predicate
+            // above already filters on exactly that. Assert the two things the predicate does NOT
+            // establish instead. subreportName is the identifier setSubreportLink is keyed by, and
+            // is a DIFFERENT string from the placed object's own auto-numbered Name; reporting it
+            // is what makes an already-embedded sub-report linkable at all.
+            added!.SubreportName.Should().Be("VibeyGoalDetail");
+            added.Name.Should().NotBe("VibeyGoalDetail");
+
+            // Also covers ReportReader.ReadSubreportLinks's otherwise-untested bare catch: a
+            // sub-report with no links yet must read back as an empty list, never as null and
+            // never by failing the whole report read.
+            added.SubreportLinks.Should().NotBeNull().And.BeEmpty();
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// F2, the finding the whole review turns on: linking a sub-report that is ALREADY embedded,
+    /// rather than one added by this same plan. Before the fix ObjectInfo carried no SubreportName,
+    /// so the only name a caller could obtain from read_report was the placed object's
+    /// ("Subreport1"), and setSubreportLink against that fails at the COM boundary with the
+    /// unhelpful "This value is write-only."; the sub-report's real name was simply not reachable.
+    ///
+    /// Measured directly against out/reports/PMSV10_GoalAlignCascade.subreport.rpt through the real
+    /// worker process before this test was written: the read reports name="Subreport1",
+    /// subreportName="GoalDetail"; a plan whose only operation is a setSubreportLink targeting
+    /// "GoalDetail" applies ok:true; and the saved report reads back exactly one link. A second
+    /// apply against THAT output appends a second link and keeps the first, which is also what
+    /// proves F3's narrowed COMException tolerance is not silently replacing the collection.
+    /// </summary>
+    [Fact]
+    public void Apply_LinksASubreportThatWasAlreadyEmbeddedByAnEarlierPlan()
+    {
+        const string subLinkField = "{Command.CardCode}";
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string mainLinkField;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+            mainLinkField = schema.AvailableFields.First(f => f.FormulaForm.Contains("emp_display_number")).FormulaForm;
+        }
+
+        // Plan 1: embed the sub-report and nothing else. This stands in for "an earlier
+        // apply_layout call", the case the previous implementation declared unsupported.
+        var embedPlan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyGoalDetail",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 100, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+                }
+            }
+        };
+
+        var embedded = ApplyAndReread(embedPlan, out var embeddedPath, sourcePath);
+        try
+        {
+            // The identity split, read back off a saved file rather than assumed.
+            var subreport = embedded.Sections.SelectMany(s => s.Objects).Single(o => o.Kind == "Subreport");
+            subreport.SubreportName.Should().Be("VibeyGoalDetail");
+            subreport.Name.Should().NotBe("VibeyGoalDetail");
+
+            // Plan 2 targets the SAVED report by that subreportName -- a name no operation in this
+            // plan created. This is the whole point of reporting SubreportName.
+            var linkPlan = new LayoutPlan
+            {
+                Operations =
+                {
+                    new LayoutOperation
+                    {
+                        Action = LayoutActions.SetSubreportLink,
+                        Target = subreport.SubreportName,
+                        MainReportField = mainLinkField,
+                        SubreportField = subLinkField
+                        // LinkedParameter deliberately omitted: Crystal discards it and substitutes
+                        // "{?Pm-<mainReportField>}", so the validator no longer requires it.
+                    }
+                }
+            };
+
+            var linked = ApplyAndReread(linkPlan, out var linkedPath, embeddedPath);
+            try
+            {
+                var links = linked.Sections.SelectMany(s => s.Objects)
+                                  .Single(o => o.Kind == "Subreport").SubreportLinks;
+                links.Should().NotBeNull();
+                links!.Should().ContainSingle();
+                links[0].MainReportFieldName.Should().Be(mainLinkField);
+                links[0].SubreportFieldName.Should().Be(subLinkField);
+                // Measured, not assumed: Crystal substitutes its own parameter for whatever is
+                // written (or, as here, for nothing at all), so assert the substitution rather than
+                // a literal the SDK does not guarantee to preserve.
+                links[0].LinkedParameterName.Should().Contain("?Pm-");
+
+                // F3, the destructive case that only shows up ACROSS applies. SetSubreportLinks
+                // replaces the whole collection, and the old code caught any COMException from
+                // GetSubreportLinks by starting from a fresh one -- which would silently turn this
+                // third plan's append into a replace, discarding the link the second plan wrote,
+                // and still report ok:true. The narrowed tolerance re-reads and requires exactly
+                // one link whenever the fallback is taken, so a real replace now fails loudly
+                // instead. Both links must be present, in order, after a completely separate apply
+                // against an already-linked file.
+                var secondMainField = mainLinkField;
+                using (var s2 = CrystalSession.Open(linkedPath))
+                {
+                    secondMainField = ReportReader.Read(s2).AvailableFields
+                        .First(f => f.FormulaForm.Contains("employee_name")).FormulaForm;
+                }
+
+                var appendPlan = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.SetSubreportLink,
+                            Target = subreport.SubreportName,
+                            MainReportField = secondMainField,
+                            SubreportField = "{Command.CardName}"
+                        }
+                    }
+                };
+
+                var appended = ApplyAndReread(appendPlan, out var appendedPath, linkedPath);
+                try
+                {
+                    var both = appended.Sections.SelectMany(s => s.Objects)
+                                       .Single(o => o.Kind == "Subreport").SubreportLinks;
+                    both.Should().NotBeNull();
+                    both!.Should().HaveCount(2, because: "the earlier plan's link must not be discarded");
+                    both[0].MainReportFieldName.Should().Be(mainLinkField);
+                    both[0].SubreportFieldName.Should().Be(subLinkField);
+                    both[1].MainReportFieldName.Should().Be(secondMainField);
+                    both[1].SubreportFieldName.Should().Be("{Command.CardName}");
+                }
+                finally { if (File.Exists(appendedPath)) File.Delete(appendedPath); }
+            }
+            finally { if (File.Exists(linkedPath)) File.Delete(linkedPath); }
+        }
+        finally { if (File.Exists(embeddedPath)) File.Delete(embeddedPath); }
+    }
+
+    /// <summary>
+    /// F3's applier-side guard, driven through the internal validation-free seam because
+    /// LayoutPlanValidator now rejects this shape first (it resolves setSubreportLink's target
+    /// against the schema's subreportName values). Measured: without the guard, an unknown
+    /// sub-report name reaches SetSubreportLinks and fails with COM "This value is write-only." --
+    /// true, but telling the caller nothing about what actually went wrong. SubreportController
+    /// .GetSubreportNames() -- present on the SDK surface but unused until now -- is the authority
+    /// on which names are addressable, so resolve against it first and say what does exist.
+    /// </summary>
+    [Fact]
+    public void Apply_SetSubreportLinkAgainstAnUnknownSubreportNameSaysSoInsteadOfFailingAtCom()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSubreportLink, Target = "NoSuchSubreport",
+                    MainReportField = "{Command.CardCode}", SubreportField = "{Command.CardName}"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<Exception>()
+             .WithMessage("*NoSuchSubreport*is not a sub-report in this report*");
     }
 
     /// <summary>
