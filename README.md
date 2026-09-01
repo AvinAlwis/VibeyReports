@@ -124,7 +124,9 @@ Layout and data-source bindings. SQL, formulas, parameters, record selection and
 be changed; `LayoutPlanValidator` rejects any attempt. **The database is only ever read** — the
 three table operations rewrite the report's own binding metadata and nothing else, and **no
 operation accepts a username or password**, ever (plans are JSON files on disk; `addTable` clones
-the connection of a table already in the report instead).
+the connection of a table already in the report instead). Where a password is unavoidable —
+`addTable` and `setTableLocation` only — it comes from the `VIBEY_DB_PASSWORD` environment
+variable, never from the plan; see below.
 
 `addField`'s `fieldRef` has its own security boundary: it must exactly match a `formulaForm`
 already exposed by the report's own data source (see `ReportSchema.AvailableFields`).
@@ -140,10 +142,34 @@ see `docs/sdk-notes.md`), so the validator refuses while any bound object surviv
 objects earlier in the same plan and the removal is accepted. Removed aliases come back in the
 response as `removedTables`.
 
-`addTable` and `setTableLocation` **make Crystal connect to the database** to verify the object,
-and a saved Crystal connection carries a user name but never a password. They therefore fail with
-"Logon failed" on any report whose connection needs one, and work only where it can log on
-unattended. `addSubreport` is the credential-free way to combine a second data source.
+### `addTable` / `setTableLocation` and `VIBEY_DB_PASSWORD`
+
+These two operations — and only these two — **make Crystal connect to the database** to verify the
+object. A saved Crystal connection carries a user name but never a password (measured), so the
+password has to come from somewhere, and it is deliberately **not** the plan:
+
+```powershell
+$env:VIBEY_DB_PASSWORD = '<password of the report connection''s database user>'
+```
+
+Set it in the environment of the process that launches the MCP server. The worker reads it at the
+moment of the call, sets it on a *clone* of the report's connection, and never stores, returns or
+logs it: it is not a field of `LayoutOperation` or `LayoutPlan`, nothing in `VibeyReports.Contracts`
+knows it exists, and every message these operations can produce — Crystal's own COM text included —
+is scrubbed of the value before it leaves the worker.
+
+- **Unset** → the operation fails immediately, naming the variable and what it is for, without
+  touching the network.
+- **Set but rejected** → Crystal's own reason is surfaced (scrubbed), naming the database user the
+  connection logs on as.
+- Reports whose connection uses **integrated security** need no variable at all.
+
+Its honest weakness: an environment variable is readable by any process running as the same user,
+and making it permanent writes it into a shell profile or the user's environment. It is chosen for
+being strictly better than a credential in a plan file, not for being a secret store.
+
+`removeTable` is unaffected — it needs no password and no network. `addSubreport` remains the
+credential-free way to combine a second data source.
 
 ## Tests
 

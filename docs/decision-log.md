@@ -1140,3 +1140,96 @@ this task edits and were fixed here.
 The fourth failure (`ExportPdf_ProducesAValidPdfForEveryRenderableFixture("SampleReport.rpt")`,
 *"The process cannot access the file because it is being used by another process"*) was left alone
 as instructed — file contention with concurrent probing, matching post-merge finding PM3.
+
+---
+
+## The credential path for `addTable` / `setTableLocation` (2026-09-01, user)
+
+`addTable` and `setTableLocation` shipped at `a9e0e25` **unusable on the customer's reports**: both
+contact the database server, and Crystal persists a connection's user name but never its password,
+so both always failed with COM `Logon failed. Unable to connect: incorrect log on parameters.`
+Confirmed again before this work by probing `out/reports/PMSV10_GoalAlignCascade.rpt`:
+`ConnectionInfo.UserName = "sgdev01db01_devlogin"` — SQL Server authentication, not integrated
+security, so there is no unattended logon to fall back on.
+
+The user's instruction: give them a credential path, from the environment variable
+**`VIBEY_DB_PASSWORD`**, set on the cloned `ConnectionInfo` immediately before the call.
+
+### Ruling — the password is NOT a contract field, and that is the whole point
+
+Nothing was added to `LayoutOperation`, `LayoutPlan` or anywhere else in `VibeyReports.Contracts`;
+that project does not know the variable exists. Plans are JSON files written to disk, quoted
+verbatim in these docs and pasted into bug reports — which is precisely why `addTable` was built
+credential-free in the first place (see the credential rule above, which stands unchanged). An
+operation field would have made a live database password routinely copy-pasteable, permanently, in
+files nobody thinks of as secret. The environment variable is acceptable *only* because it keeps the
+secret out of the plan.
+
+**Its honest weakness, stated because it is real:** an environment variable is readable by any
+process running as the same user, is inherited by every child process, and ends up in a shell
+profile (or the user's registry environment) the moment someone makes it permanent. It is not a
+secret store. It was chosen for being strictly better than the alternative on offer, not for being
+good; a DPAPI-protected file or an OS credential vault would be better and is the obvious next step
+if this ever ships to customers.
+
+### Ruling — the value must not leave the worker, and Crystal's own text is the leak
+
+`LayoutApplier` scrubs the password out of every message these two operations can throw, and the
+COM exception is **not** kept as the inner exception: a same-type, same-HRESULT copy with a scrubbed
+message is attached instead. Reason — `Program.cs` writes `ex.ToString()` to stderr, and
+`ToString()` walks the inner chain, so an unscrubbed inner would put the credential in the worker's
+log output even with a clean response. The cost is the original's stack trace, which for a logon
+rejection carries nothing the message does not.
+
+`Program.cs` also scrubs the serialised response as the last thing before it hits stdout, on the
+success path as well as the failure path. Nothing is expected to carry the value there — no contract
+type has a field for it and `ReportReader` never reads a `ConnectionInfo` — so that is defence in
+depth against a future field, not a fix for a known leak.
+
+The two tests that pin this deliberately set `VIBEY_DB_PASSWORD` to a value the response **would
+otherwise contain** (the report's file-name stem for the success path; the alias the plan names for
+the failure path) and assert both that the raw value is absent and that `***` is present. A password
+unrelated to the response would have passed either test trivially without proving anything.
+
+### Ruling — "not set" and "set but rejected" are different errors
+
+Absence is detected before any COM call and reported with a message naming `VIBEY_DB_PASSWORD` and
+what it is for; the old raw `Logon failed` told the operator nothing actionable. A rejection surfaces
+Crystal's own reason (scrubbed) and names the database user the connection logs on as — a user name
+is not a credential; it is already persisted in the `.rpt` and printed throughout these docs.
+
+The variable is read at the point of use, never cached. The worker is one process per request today,
+which makes caching indistinguishable — which is exactly why it is not worth baking the assumption in.
+
+### Ruling — the validator does not learn about the environment
+
+`LayoutPlanValidator` remains the single gate and remains **pure**: no I/O, no environment access.
+A missing `VIBEY_DB_PASSWORD` is an applier-time error, not a validation error. Cost if wrong: the
+failure arrives one layer later than it could — but a validator that reads the environment is no
+longer a pure function of (plan, schema), and every test that treats it as one would quietly become
+environment-dependent.
+
+`removeTable` is untouched: it neither reads the variable nor touches a `ConnectionInfo`, and a test
+now asserts it succeeds end to end with the variable unset, so a future `Require()` call added there
+goes red immediately.
+
+### What was verified live, and what was not
+
+Probed through the **published** worker (`publish.ps1` re-run first) against
+`out/reports/PMSV10_GoalAlignCascade.rpt`, writing to a scratch path, VPN up
+(`sgdev01db02.cloud` → 10.56.3.16). The source `.rpt` was hash-checked unchanged and no output file
+was written on any run:
+
+- **variable unset** → the new error naming `VIBEY_DB_PASSWORD`, in ~2s with no network traffic, and
+  *not* `Logon failed`. Both operations.
+- **variable set to a deliberately wrong value** → the failure changes to a server rejection:
+  `Logon failed ... Details: [Database Vendor Code: 18456]`. Vendor code 18456 is SQL Server's
+  "Login failed for user", i.e. the server was reached and refused the credential. Both operations.
+- **the wrong value appears nowhere** in the response JSON or in stderr, on both operations.
+
+**Not verified, and not claimed:** the success path. Nobody on this side has the password, so
+`addTable` has still never succeeded on this machine. The wrong-password probe proves the path works
+up to the server's authentication check and no further. Two things stay open until someone with the
+credential tries it: that a correct password makes `AddTable`/`SetTableLocation` return at all, and
+that the password stays out of a `.rpt` that is actually saved (Crystal is measured never to persist
+one, so this is expected, but expectation is not measurement).

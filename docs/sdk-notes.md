@@ -437,11 +437,47 @@ the `;1`) because that is what the report itself looks like, and records the cho
 
 `ISCRDatabaseController.SetTableLocation` fails the same way, for the same reason.
 
-**Consequence:** `addTable` and `setTableLocation` only work where the report's saved connection can
-log on unattended (integrated security, or a connection with no password). On the customer's
-reports they cannot. `addSubreport` is the credential-free way to bring a second data source into a
-report, and the `apply_layout` tool description says so. `removeTable`, by contrast, needs no
-database connection at all.
+**Consequence:** without a password `addTable` and `setTableLocation` only work where the report's
+saved connection can log on unattended (integrated security, or a connection with no password). On
+the customer's reports they cannot. `addSubreport` is the credential-free way to bring a second
+data source into a report, and the `apply_layout` tool description says so. `removeTable`, by
+contrast, needs no database connection at all.
+
+### Supplying the missing password (measured 2026-09-01, VPN up)
+
+`ISCRConnectionInfo` exposes `UserName` and `Password` as read/write `String` properties (reflected
+on both the `ISCRConnectionInfo` interface and `ConnectionInfoClass`; the `ConnectionInfo` type the
+applier uses is an interface deriving from `ISCRConnectionInfo`, so `.Password` is reachable
+through it). `Clone(true)` carries the password with the rest of the connection — verified by
+setting it on a fresh `ConnectionInfoClass`, cloning, and reading it back.
+
+So the missing half of the credential can be supplied at the point of call. `LayoutApplier` sets
+`Password` on the **clone** it hands to `AddTable`/`SetTableLocation`, from the
+`VIBEY_DB_PASSWORD` environment variable, and never from a plan.
+
+Measured against `out/reports/PMSV10_GoalAlignCascade.rpt` through the published worker, writing to
+a scratch path (the source `.rpt` was hash-checked unchanged; no output file was produced on any
+of these runs):
+
+| Variable | Result | Elapsed |
+|---|---|---|
+| unset | our own error naming `VIBEY_DB_PASSWORD`, thrown before any COM call | ~2s, no network |
+| set to a deliberately wrong value | `COMException: Logon failed. ... Unable to connect: incorrect log on parameters. Details: [Database Vendor Code: 18456]` | ~3s |
+
+**`Database Vendor Code: 18456` is SQL Server's "Login failed for user".** It appears only once a
+password is supplied, and it is the evidence that the connection now reaches the server and is
+refused *there*, rather than never getting that far. That is the difference between the two failure
+modes the tool reports, and it is why they are worth distinguishing to the caller.
+
+Identical behaviour for `setTableLocation` (same message, same vendor code).
+
+**Not measurable here:** the success path. Nobody working on this has the password for
+`sgdev01db01_devlogin`, so `addTable` has still never succeeded on this machine. What the wrong-
+password probe does establish is that everything up to the server's authentication check now works;
+what it cannot establish is that a *correct* password makes `AddTable` return, nor — since Crystal
+is measured never to persist a password into a `.rpt` — that the password stays out of a saved
+report on a run that actually saves one. Both remain open until someone with the credential tries
+it.
 
 ### Nothing here needs the database except `AddTable`/`SetTableLocation`
 

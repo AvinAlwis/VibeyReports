@@ -36,19 +36,37 @@ Layout work — reading, mutating and saving `.rpt` files — is **fully offline
 These need database connectivity, via VPN:
 
 - Rendering a report to PDF with live data
-- `addTable` / `setTableLocation` (see the limitation below)
+- `addTable` / `setTableLocation` (which also need `VIBEY_DB_PASSWORD` — see below)
 - Enumerating fields on a report whose saved data has been discarded
 
 With the VPN **down**, Crystal's OLE DB layer does not fail fast — it **blocks**. A test run that
 appears hung for tens of minutes at 0% CPU is usually this, not a deadlock in our code. Check the
 VPN before diagnosing anything else; this was misdiagnosed twice before `--blame-hang` settled it.
 
-### `addTable` and `setTableLocation` do not work on the PeoplesHR reports
+### `addTable` and `setTableLocation` need `VIBEY_DB_PASSWORD`
 
-Crystal persists a connection's **user name** but never its **password**. Both operations always
-contact the server and fail with `Logon failed`. This is not a bug to fix on a better machine — it
-is a deliberate design boundary: no Vibey Reports operation accepts a username or password, because
-plans are written to JSON files on disk. `removeTable` is unaffected and works fully offline.
+Crystal persists a connection's **user name** but never its **password**, and both operations
+always contact the server. On the PeoplesHR reports the saved connection is SQL Server
+authentication (`ConnectionInfo.UserName = sgdev01db01_devlogin`), so without a password they fail
+with `Logon failed`.
+
+The password is supplied through the **`VIBEY_DB_PASSWORD` environment variable**, set in the
+environment of the process that launches the MCP server:
+
+```powershell
+$env:VIBEY_DB_PASSWORD = '<password for that database user>'
+```
+
+It is deliberately **not** a field of the layout plan — plans are JSON files written to disk and
+quoted in documentation, so a plan must never be a place a credential is recorded. The worker reads
+the variable at the point of use, sets it on a clone of the report's connection, and scrubs the
+value out of every message it can produce. With the variable unset these two operations fail fast
+with an error that names it; with it set but rejected, the server's own reason is reported.
+
+An environment variable is a weak secret store — any process running as the same user can read it,
+and making it permanent puts it in a shell profile — so it is a deliberate trade, not a solution.
+Reports whose connection uses integrated security need no variable at all, and `removeTable` is
+unaffected: it works fully offline with no password and no network.
 
 ## Getting running
 

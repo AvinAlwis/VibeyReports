@@ -50,11 +50,20 @@ namespace VibeyReports.CrystalWorker
             catch (Exception ex)
             {
                 // Diagnostics go to stderr only - stdout is reserved for the single JSON response.
-                Console.Error.WriteLine(ex.ToString());
-                response = WorkerResponse.Failure(ex.Message);
+                // Scrubbed even here: ex.ToString() walks the inner-exception chain, and a database
+                // password must not reach a log line any more than it may reach a response.
+                // LayoutApplier already scrubs everything it throws; this is the backstop for any
+                // path that has not thought about it.
+                Console.Error.WriteLine(DatabasePassword.Scrub(ex.ToString()));
+                response = WorkerResponse.Failure(DatabasePassword.Scrub(ex.Message));
             }
 
-            Console.Out.Write(JsonSerializer.Serialize(response, VibeyJson.Options));
+            // Final scrub of the whole serialised response, success and failure alike. Nothing is
+            // expected to carry the value here - no contract type has a field for it and
+            // ReportReader never reads a ConnectionInfo - so this is defence in depth against a
+            // future field, not a fix for a known leak. It is the last thing that happens before
+            // the bytes leave the process.
+            Console.Out.Write(DatabasePassword.Scrub(JsonSerializer.Serialize(response, VibeyJson.Options)));
             Console.Out.Flush();
 
             // Exit code 0 whenever a JSON response was produced, including ok:false. Non-zero would

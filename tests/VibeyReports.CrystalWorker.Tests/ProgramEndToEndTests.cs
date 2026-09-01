@@ -334,4 +334,233 @@ public class ProgramEndToEndTests
         }
         finally { if (File.Exists(dest)) File.Delete(dest); }
     }
+
+    // --- VIBEY_DB_PASSWORD ------------------------------------------------------
+    //
+    // addTable and setTableLocation need a database password (measured: Crystal persists a
+    // connection's user name but never its password, so both operations fail "Logon failed"
+    // without one). It is supplied through the VIBEY_DB_PASSWORD environment variable and
+    // deliberately NOT through the plan - a LayoutOperation field would put a credential into a
+    // JSON file on disk.
+    //
+    // None of the tests below opens a database connection. The "variable not set" path throws
+    // before any COM call, and the scrub tests use read/removeTable, which are fully offline. A
+    // test that drove a WRONG password to a server rejection would open a real network connection,
+    // which with the VPN down BLOCKS rather than fails (post-merge finding PM1) - that path was
+    // verified by hand instead and is recorded in docs/sdk-notes.md.
+
+    /// <summary>
+    /// Runs the worker with VIBEY_DB_PASSWORD set to <paramref name="password"/> (or removed from
+    /// the child's environment when null) and returns the RAW stdout text as well as the parsed
+    /// response, because the scrub assertions have to search the serialised JSON, not just the
+    /// fields the deserialiser happens to fill.
+    /// </summary>
+    private static (WorkerResponse Response, string Stdout, string Stderr) RunWithPassword(WorkerRequest request, string password)
+    {
+        var psi = new ProcessStartInfo(WorkerExe)
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8
+        };
+
+        // The child's environment only - this never mutates the test process's own environment, so
+        // the tests stay safe to run in parallel with everything else in the suite.
+        if (password == null) psi.EnvironmentVariables.Remove("VIBEY_DB_PASSWORD");
+        else psi.EnvironmentVariables["VIBEY_DB_PASSWORD"] = password;
+
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(JsonSerializer.Serialize(request, VibeyJson.Options));
+        proc.StandardInput.Close();
+
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(120_000);
+
+        proc.ExitCode.Should().Be(0, because: $"worker crashed. stderr: {stderr}");
+        return (JsonSerializer.Deserialize<WorkerResponse>(stdout, VibeyJson.Options)!, stdout, stderr);
+    }
+
+    private static WorkerRequest AddTableRequest(string dest) => new()
+    {
+        Command = WorkerCommands.Apply,
+        ReportPath = Fixtures.SampleReport,
+        OutputPath = dest,
+        Plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddTable,
+                    Target = "Command",          // SampleReport.rpt's only table
+                    TableName = "sp_vibey_probe;1",
+                    NewName = "sp_vibey_probe;1"
+                }
+            }
+        }
+    };
+
+    /// <summary>
+    /// The absent-variable path must name the variable and say what it is for - NOT surface a raw
+    /// "Logon failed", which is what shipped before and told the operator nothing actionable.
+    /// </summary>
+    [Fact]
+    public void Apply_AddTableWithoutTheDatabasePasswordVariable_FailsNamingTheVariableNotLogonFailed()
+    {
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var (response, _, _) = RunWithPassword(AddTableRequest(dest), password: null);
+
+            response.Ok.Should().BeFalse();
+            response.Error.Should().Contain("VIBEY_DB_PASSWORD");
+            response.Error.Should().Contain("addTable");
+            response.Error.Should().NotContain("Logon failed");
+            File.Exists(dest).Should().BeFalse(because: "ok:false must imply nothing was written");
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
+    [Fact]
+    public void Apply_SetTableLocationWithoutTheDatabasePasswordVariable_FailsNamingTheVariable()
+    {
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var request = new WorkerRequest
+            {
+                Command = WorkerCommands.Apply,
+                ReportPath = Fixtures.SampleReport,
+                OutputPath = dest,
+                Plan = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.SetTableLocation,
+                            Target = "Command",
+                            TableName = "sp_vibey_probe;1"
+                        }
+                    }
+                }
+            };
+
+            var (response, _, _) = RunWithPassword(request, password: null);
+
+            response.Ok.Should().BeFalse();
+            response.Error.Should().Contain("VIBEY_DB_PASSWORD");
+            response.Error.Should().Contain("setTableLocation");
+            response.Error.Should().NotContain("Logon failed");
+            File.Exists(dest).Should().BeFalse();
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
+    /// <summary>
+    /// removeTable is fully offline and must stay that way: it neither reads VIBEY_DB_PASSWORD nor
+    /// touches a ConnectionInfo, so it succeeds with the variable absent. If it ever grew a
+    /// Require() call this test would go red immediately.
+    /// </summary>
+    [Fact]
+    public void Apply_RemoveTableSucceedsWithNoDatabasePasswordSet()
+    {
+        var read = Run(new WorkerRequest { Command = WorkerCommands.Read, ReportPath = Fixtures.SampleReport });
+        var alias = read.Schema!.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+        var bound = read.Schema.Sections.SelectMany(s => s.Objects)
+                        .Where(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + "."))
+                        .Select(o => o.Name).ToList();
+
+        var plan = new LayoutPlan();
+        foreach (var name in bound)
+            plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = name });
+        plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias });
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var (response, _, _) = RunWithPassword(
+                new WorkerRequest
+                {
+                    Command = WorkerCommands.Apply,
+                    ReportPath = Fixtures.SampleReport,
+                    OutputPath = dest,
+                    Plan = plan
+                },
+                password: null);
+
+            response.Ok.Should().BeTrue(because: response.Error);
+            response.RemovedTables.Should().ContainSingle().Which.Should().Be(alias);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
+    /// <summary>
+    /// The SUCCESS path never carries the password out of the process.
+    ///
+    /// A password unrelated to the response would pass this trivially, so the value used here is
+    /// chosen to be one that the response WOULD otherwise contain: the report's own file-name stem,
+    /// which appears in schema.reportPath and outputPath. If the final scrub in Program.cs were
+    /// removed, the raw value would be all over this JSON and the assertion fails.
+    /// </summary>
+    [Fact]
+    public void Read_SuccessResponseNeverContainsTheDatabasePasswordValue()
+    {
+        const string secretThatWouldOtherwiseAppear = "SampleReport";
+
+        var (response, stdout, stderr) = RunWithPassword(
+            new WorkerRequest { Command = WorkerCommands.Read, ReportPath = Fixtures.SampleReport },
+            secretThatWouldOtherwiseAppear);
+
+        response.Ok.Should().BeTrue(because: response.Error);
+        stdout.Should().NotContain(secretThatWouldOtherwiseAppear);
+        stdout.Should().Contain("***", because: "the value was present and must have been redacted, not merely absent");
+        stderr.Should().NotContain(secretThatWouldOtherwiseAppear);
+    }
+
+    /// <summary>
+    /// The FAILURE path never carries it either. Same technique: the password is set to a string
+    /// the error message is guaranteed to quote back (the alias the plan asked for), so the
+    /// assertion can only pass because the scrub ran.
+    /// </summary>
+    [Fact]
+    public void Apply_FailureResponseNeverContainsTheDatabasePasswordValue()
+    {
+        const string secretThatWouldOtherwiseAppear = "sp_definitely_not_in_this_report;1";
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var (response, stdout, stderr) = RunWithPassword(
+                new WorkerRequest
+                {
+                    Command = WorkerCommands.Apply,
+                    ReportPath = Fixtures.SampleReport,
+                    OutputPath = dest,
+                    Plan = new LayoutPlan
+                    {
+                        Operations =
+                        {
+                            new LayoutOperation
+                            {
+                                Action = LayoutActions.RemoveTable,
+                                Target = secretThatWouldOtherwiseAppear
+                            }
+                        }
+                    }
+                },
+                secretThatWouldOtherwiseAppear);
+
+            response.Ok.Should().BeFalse();
+            response.Error.Should().NotBeNullOrEmpty();
+            stdout.Should().NotContain(secretThatWouldOtherwiseAppear);
+            stdout.Should().Contain("***");
+            stderr.Should().NotContain(secretThatWouldOtherwiseAppear);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
 }

@@ -797,12 +797,22 @@ namespace VibeyReports.CrystalWorker
         //
         // The boundary these three operations sit on: report METADATA may be written, the database
         // is only ever READ. Nothing here executes SQL or changes a connection's server, database
-        // or credentials. addTable CLONES the ConnectionInfo of a table already in the report and
-        // setTableLocation keeps the table's own ConnectionInfo untouched, so no username or
-        // password is ever expressed in a plan -- plans are JSON files on disk and get quoted in
-        // documentation. ISCRConnectionInfo.UserName/Password are never read or written here.
-        // (Measured: the reports in out/reports/ persist UserName but no Password, so a plan could
-        // not learn a password from a report even if it tried to.)
+        // or user. addTable CLONES the ConnectionInfo of a table already in the report and
+        // setTableLocation keeps the table's own ConnectionInfo untouched, so no server, database
+        // or user name is ever expressed in a plan -- plans are JSON files on disk and get quoted
+        // in documentation.
+        //
+        // The one exception, and its rules: addTable and setTableLocation make Crystal contact the
+        // database server, and a report persists its connection's UserName but never its Password
+        // (measured; docs/sdk-notes.md). Those two operations therefore set Password on the CLONED
+        // ConnectionInfo immediately before the call, from the VIBEY_DB_PASSWORD environment
+        // variable (see DatabasePassword). The password is still NOT part of the contract: it is
+        // not a LayoutOperation field, not a LayoutPlan field, and nothing in
+        // VibeyReports.Contracts knows it exists. It is never read back out of a ConnectionInfo,
+        // and every message these two methods can throw is scrubbed of it first, because Crystal's
+        // own COM text is composed by the database driver and travels into WorkerResponse.Error.
+        // removeTable neither reads the variable nor touches ConnectionInfo at all -- it is fully
+        // offline and stays that way.
 
         /// <summary>
         /// Finds a data-source table by alias, matched case-insensitively the way the validator
@@ -890,18 +900,25 @@ namespace VibeyReports.CrystalWorker
 
         /// <summary>
         /// Adds a table or stored procedure to the report's data source, cloning the connection of
-        /// a table already present so no credential is ever expressed in a plan.
+        /// a table already present so no server, database or user name is ever expressed in a plan.
         ///
-        /// MEASURED LIMITATION, and it is a real one: AddTable always contacts the database
-        /// server. Against out/reports/PMSV10_GoalAlignCascade.rpt it throws COMException "Logon
-        /// failed. Unable to connect: incorrect log on parameters." -- because Crystal persists a
-        /// connection's UserName but never its Password. That was measured across every variation
-        /// that could plausibly matter (ProcedureClass and TableClass; a three-part qualified name,
-        /// a bare one, and the source table's verbatim; parameters cloned from the source and left
-        /// empty; and a full src.Clone(true) carrying the source's DataFields), and the failure was
-        /// identical every time -- the call never gets far enough for the table's shape to matter.
-        /// So addTable can only succeed where the report's saved connection logs on unattended
-        /// (integrated security, or a connection with no password). See docs/sdk-notes.md.
+        /// MEASURED, and it is what shapes this method: AddTable always contacts the database
+        /// server. Against out/reports/PMSV10_GoalAlignCascade.rpt it threw COMException "Logon
+        /// failed. Unable to connect: incorrect log on parameters." on every attempt -- because
+        /// Crystal persists a connection's UserName (there, "sgdev01db01_devlogin", i.e. SQL Server
+        /// authentication, not integrated security) but never its Password. That was measured
+        /// across every variation that could plausibly matter (ProcedureClass and TableClass; a
+        /// three-part qualified name, a bare one, and the source table's verbatim; parameters
+        /// cloned from the source and left empty; and a full src.Clone(true) carrying the source's
+        /// DataFields), and the failure was identical every time -- the call never gets far enough
+        /// for the table's shape to matter.
+        ///
+        /// So the missing password is supplied here, from the VIBEY_DB_PASSWORD environment
+        /// variable, set on the CLONE immediately before the call. It is read at the point of use
+        /// and never stored, never returned, and never allowed into a message (see
+        /// DatabasePassword). A report whose saved connection logs on unattended (integrated
+        /// security) still works with the variable unset -- but the driving reports here do not,
+        /// which is why absence is an error rather than a silent attempt.
         /// </summary>
         private static void AddTable(ISCDReportClientDocument doc, LayoutOperation op)
         {
@@ -911,14 +928,28 @@ namespace VibeyReports.CrystalWorker
                 throw new InvalidOperationException(
                     $"\"addTable\": a table with the alias \"{op.NewName}\" is already in this report's data source.");
 
+            if (source.ConnectionInfo == null)
+                throw new InvalidOperationException(
+                    $"\"addTable\": the table \"{op.Target}\" has no saved connection to clone, so there is " +
+                    "nothing to attach the new table to.");
+
+            // Read at the point of use, not at process start: nothing here assumes the worker is
+            // short-lived. Throws a message naming VIBEY_DB_PASSWORD when it is unset, BEFORE any
+            // COM call, so "variable not set" can never be mistaken for a server rejection.
+            var password = DatabasePassword.Require(LayoutActions.AddTable);
+
             // ProcedureClass when the source is a stored procedure, TableClass otherwise: mirror
             // the shape the report already uses rather than picking one. Every table in the
             // driving reports is a Procedure (ClassName "CrystalReports.Procedure").
             ISCRTable table = source is ISCRProcedure ? (ISCRTable)new ProcedureClass() : new TableClass();
 
             // The ONLY thing taken from the source table. Clone(true) is a deep copy, so the new
-            // table does not alias the existing one's connection object.
-            table.ConnectionInfo = (ConnectionInfo)source.ConnectionInfo.Clone(true);
+            // table does not alias the existing one's connection object -- which matters twice
+            // over now: the password below is set on the CLONE, so the table already in the report
+            // never has one written into it.
+            var connection = (ConnectionInfo)source.ConnectionInfo.Clone(true);
+            connection.Password = password;
+            table.ConnectionInfo = connection;
             table.Name = op.TableName;
             table.Alias = op.NewName;
             table.QualifiedName = QualifiedNameFor(source, op.TableName);
@@ -938,14 +969,17 @@ namespace VibeyReports.CrystalWorker
             catch (COMException ex)
             {
                 throw new InvalidOperationException(
-                    $"Crystal rejected \"addTable\" for \"{op.NewName}\" ({op.TableName}): {ex.Message.Trim()} " +
+                    $"Crystal rejected \"addTable\" for \"{op.NewName}\" ({op.TableName}): " +
+                    $"{DatabasePassword.Scrub(ex.Message, password).Trim()} " +
                     "Adding a table makes Crystal connect to the database to verify it. The connection " +
-                    "cloned from \"" + op.Target + "\" carries the report's saved server, database and user " +
-                    "name but NOT its password -- Crystal does not persist passwords, and Vibey Reports " +
-                    "deliberately never accepts a credential in a layout plan. So addTable only works where " +
-                    "the report's saved connection can log on unattended. To combine a second data source " +
-                    "without a logon, embed it as a sub-report (addSubreport), which brings its own " +
-                    "connection with it.", ex);
+                    $"cloned from \"{op.Target}\" carries the report's saved server, database and user name " +
+                    $"({DescribeUser(source)}), and the password was supplied from the {DatabasePassword.EnvVarName} " +
+                    "environment variable, which IS set -- so the server was reached and refused the logon, " +
+                    "or refused the object. Check that the variable holds the current password for that user " +
+                    "and that the named object exists and is visible to it. To combine a second data source " +
+                    "with no logon at all, embed it as a sub-report (addSubreport), which brings its own " +
+                    "connection with it.",
+                    ScrubbedCopy(ex, password));
             }
         }
 
@@ -956,11 +990,20 @@ namespace VibeyReports.CrystalWorker
         ///
         /// Carries the same measured logon requirement as AddTable -- SetTableLocation against
         /// out/reports/PMSV10_GoalAlignCascade.rpt throws COMException "Logon failed." for the same
-        /// reason. See docs/sdk-notes.md.
+        /// reason, and takes its password from VIBEY_DB_PASSWORD the same way. See
+        /// docs/sdk-notes.md.
         /// </summary>
         private static void SetTableLocation(ISCDReportClientDocument doc, LayoutOperation op)
         {
             var current = RequireTable(doc, op.Target, LayoutActions.SetTableLocation);
+
+            if (current.ConnectionInfo == null)
+                throw new InvalidOperationException(
+                    $"\"setTableLocation\": the table \"{op.Target}\" has no saved connection, so there is " +
+                    "nothing to repoint it on.");
+
+            // Read at the point of use, before any COM call, exactly as AddTable does.
+            var password = DatabasePassword.Require(LayoutActions.SetTableLocation);
 
             // Clone(true) copies the ConnectionInfo along with everything else, so the repointed
             // table keeps exactly the connection it had. Only Name/QualifiedName change; Alias is
@@ -968,6 +1011,15 @@ namespace VibeyReports.CrystalWorker
             var replacement = current.Clone(true);
             replacement.Name = op.TableName;
             replacement.QualifiedName = QualifiedNameFor(current, op.TableName);
+
+            // The password goes on a FRESH clone assigned to the replacement, so the table
+            // currently in the document is never mutated -- if this call throws, nothing in the
+            // live document has been given a password, and the session is faulted so nothing is
+            // saved either. Server, database and user name are unchanged: only the missing
+            // password is added.
+            var connection = (ConnectionInfo)current.ConnectionInfo.Clone(true);
+            connection.Password = password;
+            replacement.ConnectionInfo = connection;
 
             try
             {
@@ -977,12 +1029,41 @@ namespace VibeyReports.CrystalWorker
             {
                 throw new InvalidOperationException(
                     $"Crystal rejected \"setTableLocation\" for \"{op.Target}\" -> \"{op.TableName}\": " +
-                    $"{ex.Message.Trim()} Repointing a table makes Crystal connect to the database to verify " +
-                    "the new object. The report's saved connection carries a server, database and user name " +
-                    "but no password (Crystal does not persist one), and Vibey Reports deliberately never " +
-                    "accepts a credential in a layout plan, so this only works where the saved connection can " +
-                    "log on unattended.", ex);
+                    $"{DatabasePassword.Scrub(ex.Message, password).Trim()} Repointing a table makes Crystal " +
+                    "connect to the database to verify the new object. The report's saved connection " +
+                    $"({DescribeUser(current)}) was used with the password from the {DatabasePassword.EnvVarName} " +
+                    "environment variable, which IS set -- so the server was reached and refused the logon, or " +
+                    "refused the object. Check that the variable holds the current password for that user and " +
+                    "that the named object exists and is visible to it.",
+                    ScrubbedCopy(ex, password));
             }
+        }
+
+        /// <summary>
+        /// Names the database user a connection logs on as, for diagnosis. A user name is not a
+        /// credential (it is already persisted in the .rpt and printed in this project's docs) --
+        /// the password is, and it is never read back out of a ConnectionInfo anywhere.
+        /// </summary>
+        private static string DescribeUser(ISCRTable table)
+        {
+            string user = null;
+            try { user = table.ConnectionInfo?.UserName; } catch (COMException) { /* diagnosis only */ }
+            return string.IsNullOrEmpty(user)
+                ? "no user name saved, so the connection expects integrated security"
+                : "user \"" + user + "\"";
+        }
+
+        /// <summary>
+        /// A same-type, same-HRESULT copy of a COM exception with the password removed from its
+        /// message. The ORIGINAL is deliberately not kept as the inner exception: Program.cs writes
+        /// ex.ToString() to stderr, and ToString() walks the inner chain, so an unscrubbed inner
+        /// would put the credential in the worker's log output even though the response itself was
+        /// clean. The cost is the original's stack trace, which for a COM logon rejection carries
+        /// no information the message does not.
+        /// </summary>
+        private static COMException ScrubbedCopy(COMException ex, string password)
+        {
+            return new COMException(DatabasePassword.Scrub(ex.Message, password), ex.ErrorCode);
         }
 
         /// <summary>

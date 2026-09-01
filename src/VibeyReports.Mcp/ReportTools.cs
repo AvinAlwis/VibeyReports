@@ -132,8 +132,9 @@ public sealed class ReportTools
         removeTable / addTable / setTableLocation change the report's own data-source bindings.
         Their "target" is a TABLE ALIAS, not an object name: use one of the distinct tableAlias
         values from the schema's availableFields (e.g. "sp_perf_goal_align_detail;1"). None of
-        them accepts a server, database, user name or password, and none of them writes to the
-        database - the database is only ever read.
+        them takes a server, database, user name or password as an operation field - a plan can
+        never carry a credential - and none of them writes to the database: the database is only
+        ever read.
         removeTable is the one to reach for when a report is bound to two unrelated tables or
         stored procedures with no link between them, which Crystal renders as a cartesian join
         (every row of one multiplied by every row of the other). Crystal itself does NOT stop you
@@ -144,10 +145,15 @@ public sealed class ReportTools
         table; that has to be undone in the Crystal Designer.
         addTable and setTableLocation MAKE CRYSTAL CONNECT TO THE DATABASE to verify the object,
         and the connection saved in a report carries its user name but not its password (Crystal
-        does not persist one). They therefore fail with "Logon failed" on any report whose saved
-        connection needs a password, and they only work where it can log on unattended
-        (integrated security). This is measured, not theoretical. To combine a second data source
-        without any logon, use addSubreport instead - a sub-report brings its own connection.
+        does not persist one). The missing password is read from the VIBEY_DB_PASSWORD environment
+        variable of the process running this tool - it is NOT part of a plan and there is no
+        operation field for it, because plans are JSON files written to disk and must never record
+        a credential. Never ask for it, never put it in a plan, and never repeat it if you somehow
+        see it. If VIBEY_DB_PASSWORD is not set, these two operations fail immediately with an
+        error saying so; tell the user to set it rather than retrying. If it is set and the server
+        rejects it, the error says that instead, with the database user named. Reports whose saved
+        connection uses integrated security need no variable. To combine a second data source with
+        no logon at all, use addSubreport instead - a sub-report brings its own connection.
         addTable also cannot tell you the new table's fields; re-read the report afterwards
         before trying to addField from it.
         A newly added text or field object inherits the font of existing objects already in its
