@@ -95,16 +95,21 @@ Ln 'HdrRule' 0 1130 $W 0
 # ---- Employee Details ---------------------------------------------------------
 $y = Band 'EMPLOYEE DETAILS' 1250
 Bx 'EmpBox' $y 2160
+# Location was removed from this report: it had no source column (the spec's
+# emp_work_station does not exist on hs_hr_employee) and was dropped from the
+# spec too. Five fields remain, so the last row carries only a left-hand pair.
 $rows = @(
-  @{ lk='Employee Name'; lf='employee_name';      rk='Designation';       rf='designation' },
-  @{ lk='Employee ID';   lf='emp_display_number'; rk='Department';        rf='department' },
-  @{ lk='Location';      lf='location';           rk='Reporting Manager'; rf='reporting_manager' })
+  @{ lk='Employee Name'; lf='employee_name';      rk='Designation'; rf='designation' },
+  @{ lk='Employee ID';   lf='emp_display_number'; rk='Department';  rf='department' },
+  @{ lk='Reporting Manager'; lf='reporting_manager'; rk=''; rf='' })
 for ($i=0; $i -lt 3; $i++) {
   $ry = $y + 180 + ($i * 660)
   Txt "EL$i" $rows[$i].lk 150 $ry 2100 230 8 $false;  Ink "EL$i" $MUTED
   Fld "EV$i" $rows[$i].lf 2350 $ry 2450 260 9;        Ink "EV$i" $INK
-  Txt "ER$i" $rows[$i].rk 5800 $ry 2100 230 8 $false; Ink "ER$i" $MUTED
-  Fld "ERV$i" $rows[$i].rf 8000 $ry 3036 260 9;       Ink "ERV$i" $INK
+  if ($rows[$i].rk -ne '') {
+    Txt "ER$i" $rows[$i].rk 5800 $ry 2100 230 8 $false; Ink "ER$i" $MUTED
+    Fld "ERV$i" $rows[$i].rf 8000 $ry 3036 260 9;       Ink "ERV$i" $INK
+  }
   if ($i -lt 2) { Ln "EDiv$i" 150 ($ry+480) 10886 0 }
 }
 $y = $y + 2160
