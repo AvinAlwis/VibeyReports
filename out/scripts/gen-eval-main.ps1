@@ -171,9 +171,15 @@ Op @{ action='setSubreportLink'; target='StageWise'
 $y = $y + 2400
 
 # Company logo, top-left of page 1. No links - the procedure takes no parameters.
+#
+# This MUST point at the laid-out logo report, not the raw shell. A sub-report
+# renders at the height of ITS OWN sections, not the height given here: pointing
+# at an unlaid-out shell embeds five default-height empty sections, which is what
+# made the logo overflow down across the Employee Details panel. The laid-out
+# version collapses every section except Details and holds only the blob field.
 Op @{ action='addSubreport'; section=$SEC; newName='CompanyLogo';
-      reportPath='D:/VibeyReports/out/reports/_shell_logo.rpt'
-      leftTwips=0; topTwips=40; widthTwips=1700; heightTwips=780 }
+      reportPath='D:/VibeyReports/out/reports/PMSV10_IndDetEval_Logo.rpt'
+      leftTwips=0; topTwips=40; widthTwips=1600; heightTwips=700 }
 
 $p1h = $y + 150
 
