@@ -1222,7 +1222,15 @@ public class LayoutApplierTests
         try
         {
             // The identity split, read back off a saved file rather than assumed.
-            var subreport = embedded.Sections.SelectMany(s => s.Objects).Single(o => o.Kind == "Subreport");
+            // Selected by SubreportName, NOT by Kind alone: PMSV10_IndPerfOverview.rpt already
+            // embeds two sub-reports of its own ("company logo" in the page header and "stage wise
+            // eval" in the details band), so a bare Single(o => o.Kind == "Subreport") matched
+            // three objects and threw. Picking the one this plan added is also the stronger
+            // assertion -- it proves the newly embedded sub-report is addressable by the newName
+            // the plan chose, which is the whole point of the test, rather than assuming there is
+            // only one sub-report to find.
+            var subreport = embedded.Sections.SelectMany(s => s.Objects)
+                .Single(o => o.Kind == "Subreport" && o.SubreportName == "VibeyGoalDetail");
             subreport.SubreportName.Should().Be("VibeyGoalDetail");
             subreport.Name.Should().NotBe("VibeyGoalDetail");
 
@@ -1248,7 +1256,7 @@ public class LayoutApplierTests
             try
             {
                 var links = linked.Sections.SelectMany(s => s.Objects)
-                                  .Single(o => o.Kind == "Subreport").SubreportLinks;
+                                  .Single(o => o.SubreportName == "VibeyGoalDetail").SubreportLinks;
                 links.Should().NotBeNull();
                 links!.Should().ContainSingle();
                 links[0].MainReportFieldName.Should().Be(mainLinkField);
@@ -1291,7 +1299,7 @@ public class LayoutApplierTests
                 try
                 {
                     var both = appended.Sections.SelectMany(s => s.Objects)
-                                       .Single(o => o.Kind == "Subreport").SubreportLinks;
+                                       .Single(o => o.SubreportName == "VibeyGoalDetail").SubreportLinks;
                     both.Should().NotBeNull();
                     both!.Should().HaveCount(2, because: "the earlier plan's link must not be discarded");
                     both[0].MainReportFieldName.Should().Be(mainLinkField);
@@ -1438,5 +1446,229 @@ public class LayoutApplierTests
                 because: "two distinct links must not have collapsed into the same parameter binding");
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+    // ---- data-source table operations ------------------------------------
+    //
+    // Every claim in these tests was measured against the installed 11.5 RAS before it was
+    // written, and two of the measurements contradicted what was expected:
+    //
+    // 1. RemoveTable does not refuse a table that report objects are still bound to -- it
+    //    CASCADE-DELETES them, silently. Measured on out/reports/PMSV10_GoalAlignCascade.rpt:
+    //    removing "sp_perf_goal_align_cascade;1" took the report from 70 objects to 59,
+    //    "sp_perf_goal_align_detail;1" took 59 to 54 (the five DR0..DR4 fields bound to it), and
+    //    "sp_perf_company_logo;1" took 54 to 53. None of those deletions was reported, requested
+    //    or recoverable. LayoutPlanValidator refusing the removal while a bound object survives is
+    //    the ONLY thing that prevents it.
+    // 2. A table that participates in a TableLink needs no link removal first: AddTableLink
+    //    (cascade -> detail) followed by RemoveTable("...detail;1") succeeded, and TableLinks went
+    //    1 -> 0 on its own.
+    //
+    // Crystal does refuse some removals of its own accord -- measured on
+    // tests/fixtures/Documents.rpt and PMSV10_IndPerfOverview.rpt, where formulas/record selection
+    // still reference the table ("There are still fields in the report from this table"). That
+    // path is covered below. Removing the link first does NOT help there, and a table with no
+    // links at all ("CompanyInfo" in Documents.rpt) is refused identically, which is why the
+    // applier has no speculative RemoveTableLink step.
+    //
+    // addTable and setTableLocation have no round-trip test here on purpose: measured, both make
+    // Crystal connect to the database (COMException "Logon failed. Unable to connect: incorrect
+    // log on parameters." on every fixture, because Crystal persists a connection's user name but
+    // never its password). A test that drove them to success would need a fixture whose saved
+    // connection logs on unattended, and one that drove them to failure would open a real network
+    // connection -- which, with the VPN down, blocks rather than fails (post-merge finding PM1).
+    // Their offline guards are tested instead. See docs/sdk-notes.md.
+
+    /// <summary>
+    /// The driving case end to end: strip the objects bound to a table, then drop the table, in
+    /// ONE plan. SampleReport.rpt's only table is "Command" with two bound Field objects.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesADataSourceTableOnceThePlanHasRemovedItsBoundObjects()
+    {
+        string alias;
+        List<string> bound;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            bound = before.Sections.SelectMany(x => x.Objects)
+                          .Where(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + "."))
+                          .Select(o => o.Name).ToList();
+        }
+
+        bound.Should().NotBeEmpty(because: "the fixture must actually exercise the bound-object rule");
+
+        var plan = new LayoutPlan();
+        foreach (var name in bound)
+            plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = name });
+        plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias });
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.RemovedTables.Should().ContainSingle().Which.Should().Be(alias);
+            result.RemovedObjects.Should().BeEquivalentTo(bound);
+            schema.AvailableFields.Select(f => f.TableAlias).Should().NotContain(alias,
+                because: "the table must be gone from the saved report, not just from the in-memory document");
+            schema.Sections.SelectMany(x => x.Objects).Select(o => o.Name).Should().NotIntersectWith(bound);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The rule the whole operation exists for. Crystal itself would accept this and silently
+    /// delete the bound fields (see the block comment above), so the refusal has to come from the
+    /// validator -- and it must name the offending objects, or the agent cannot fix the plan.
+    /// Driven through the public Apply, i.e. the gate production code actually goes through.
+    /// </summary>
+    [Fact]
+    public void Apply_RefusesToRemoveATableWhileAnObjectIsStillBoundToIt()
+    {
+        string alias;
+        string boundName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            boundName = before.Sections.SelectMany(x => x.Objects)
+                              .First(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + ".")).Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias } }
+        };
+
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        Action apply = () => LayoutApplier.Apply(session, plan);
+
+        apply.Should().Throw<LayoutApplier.InvalidPlanException>()
+             .Which.Result.Errors.Should().ContainSingle()
+             .Which.Message.Should().Contain(boundName);
+    }
+
+    /// <summary>
+    /// Crystal's own refusal, wrapped. PMSV10_IndPerfOverview.rpt refuses to give up its only
+    /// table even after every Field object bound to it has been removed -- something else in the
+    /// report (formula, record selection, group or sort) still refers to it, and that is outside
+    /// what this tool can edit. Measured: the COM message is "There are still fields in the report
+    /// from this table.  Please clear them before removing the table." Requires no database.
+    /// </summary>
+    [Fact]
+    public void Apply_WrapsCrystalsOwnRefusalToRemoveATableWithContext()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string alias;
+        List<string> bound;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            bound = before.Sections.SelectMany(x => x.Objects)
+                          .Where(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + "."))
+                          .Select(o => o.Name).ToList();
+        }
+
+        var plan = new LayoutPlan();
+        foreach (var name in bound)
+            plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = name });
+        plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias });
+
+        using var session = CrystalSession.Open(sourcePath);
+        Action apply = () => LayoutApplier.Apply(session, plan);
+
+        var thrown = apply.Should().Throw<InvalidOperationException>().Which;
+        thrown.Message.Should().Contain("removeTable").And.Contain(alias);
+        thrown.InnerException.Should().BeOfType<System.Runtime.InteropServices.COMException>(
+            because: "the COM message is the part that says WHY Crystal refused, and it must not be discarded");
+    }
+
+    /// <summary>
+    /// The applier's own existence guard, which is NOT redundant with the validator's: the
+    /// validator deliberately skips its table existence check when ReportSchema.AvailableFields is
+    /// empty (no database connection -- absence cannot be proven from an empty list), so an alias
+    /// that does not exist can and does reach the applier. Driven through the internal
+    /// validation-free seam because with this fixture's fields readable the validator would reject
+    /// it first.
+    /// </summary>
+    [Fact]
+    public void Apply_RemoveTableNamesTheAliasesThatDoExistWhenTheTargetDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_not_here;1" } }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*sp_not_here;1*Aliases present*Command*");
+    }
+
+    [Fact]
+    public void Apply_AddTableNamesTheAliasesThatDoExistWhenTheSourceAliasDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddTable, Target = "sp_not_here;1",
+                    TableName = "sp_new;1", NewName = "sp_new;1"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        // Fails before any COM call, so this test never opens a database connection.
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*addTable*sp_not_here;1*Aliases present*Command*");
+    }
+
+    [Fact]
+    public void Apply_AddTableRefusesAnAliasThatIsAlreadyInTheDataSource()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddTable, Target = "Command",
+                    TableName = "sp_new;1", NewName = "Command"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*already in this report's data source*");
+    }
+
+    [Fact]
+    public void Apply_SetTableLocationNamesTheAliasesThatDoExistWhenTheTargetDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetTableLocation, Target = "sp_not_here;1", TableName = "sp_new;1"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*setTableLocation*sp_not_here;1*Aliases present*Command*");
     }
 }

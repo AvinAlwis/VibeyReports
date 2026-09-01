@@ -30,6 +30,13 @@ namespace VibeyReports.CrystalWorker
         {
             public int OperationsApplied { get; set; }
             public List<string> RemovedObjects { get; set; } = new List<string>();
+
+            /// <summary>
+            /// Aliases deleted by a "removeTable" operation. Same reasoning as RemovedObjects: a
+            /// destructive operation must say what it destroyed, and removing a table takes every
+            /// field it exposed out of the report with it.
+            /// </summary>
+            public List<string> RemovedTables { get; set; } = new List<string>();
         }
 
         public sealed class InvalidPlanException : Exception
@@ -178,6 +185,18 @@ namespace VibeyReports.CrystalWorker
 
                         case LayoutActions.SetSubreportLink:
                             SetSubreportLink(doc, op);
+                            break;
+
+                        case LayoutActions.RemoveTable:
+                            result.RemovedTables.Add(RemoveTable(doc, op.Target));
+                            break;
+
+                        case LayoutActions.AddTable:
+                            AddTable(doc, op);
+                            break;
+
+                        case LayoutActions.SetTableLocation:
+                            SetTableLocation(doc, op);
                             break;
 
                         default:
@@ -772,6 +791,218 @@ namespace VibeyReports.CrystalWorker
                     $"\"setSubreportLink\" for \"{op.Target}\": this sub-report's existing links could not be read " +
                     $"before the link was added, so it was set from an empty collection, but {afterCount} links are " +
                     "present afterwards -- pre-existing links may have been discarded. The report was not saved.");
+        }
+
+        // --- data source tables ----------------------------------------------
+        //
+        // The boundary these three operations sit on: report METADATA may be written, the database
+        // is only ever READ. Nothing here executes SQL or changes a connection's server, database
+        // or credentials. addTable CLONES the ConnectionInfo of a table already in the report and
+        // setTableLocation keeps the table's own ConnectionInfo untouched, so no username or
+        // password is ever expressed in a plan -- plans are JSON files on disk and get quoted in
+        // documentation. ISCRConnectionInfo.UserName/Password are never read or written here.
+        // (Measured: the reports in out/reports/ persist UserName but no Password, so a plan could
+        // not learn a password from a report even if it tried to.)
+
+        /// <summary>
+        /// Finds a data-source table by alias, matched case-insensitively the way the validator
+        /// matches it. Returns null when absent; every caller turns that into a message listing
+        /// the aliases that DO exist, because the validator's own existence check is deliberately
+        /// skipped when ReportSchema.AvailableFields is empty (no database connection) and absence
+        /// cannot be proven from an empty list.
+        /// </summary>
+        private static ISCRTable FindTable(ISCDReportClientDocument doc, string alias)
+        {
+            var tables = doc.DatabaseController.Database.Tables;
+            for (var i = 0; i < tables.Count; i++)
+            {
+                var t = (ISCRTable)tables[i];
+                if (string.Equals(t.Alias, alias, StringComparison.OrdinalIgnoreCase)) return t;
+            }
+            return null;
+        }
+
+        private static string KnownAliases(ISCDReportClientDocument doc)
+        {
+            var tables = doc.DatabaseController.Database.Tables;
+            var names = new List<string>();
+            for (var i = 0; i < tables.Count; i++) names.Add(((ISCRTable)tables[i]).Alias);
+            return names.Count == 0 ? "(this report has no data-source tables)" : string.Join(", ", names);
+        }
+
+        private static ISCRTable RequireTable(ISCDReportClientDocument doc, string alias, string action)
+        {
+            var table = FindTable(doc, alias);
+            if (table == null)
+                throw new InvalidOperationException(
+                    $"\"{action}\": no table with the alias \"{alias}\" is in this report's data source. " +
+                    $"Aliases present: {KnownAliases(doc)}.");
+            return table;
+        }
+
+        /// <summary>
+        /// Deletes a table from the report's data source. Returns the table's canonical alias (not
+        /// the caller's possibly case-variant string) so RemovedTables reports the report's own
+        /// spelling.
+        ///
+        /// Measured against the installed 11.5 assemblies, because two plausible assumptions about
+        /// this call turned out to be wrong:
+        ///
+        /// - RemoveTable does NOT refuse a table that report objects are still bound to.
+        ///   PMSV10_GoalAlignCascade.rpt has five Field objects bound to
+        ///   "sp_perf_goal_align_detail;1" and the table was removed cleanly anyway, leaving those
+        ///   fields unresolvable. LayoutPlanValidator is the only thing standing between a model
+        ///   and that outcome.
+        /// - A table that participates in a TableLink does NOT need the link removed first.
+        ///   Measured directly: AddTableLink(cascade -&gt; detail) then RemoveTable("...detail;1")
+        ///   succeeded, and Database.TableLinks went 1 -&gt; 0 on its own. So there is deliberately
+        ///   no RemoveTableLink pre-step here. The converse was measured too: on
+        ///   tests/fixtures/Documents.rpt, RemoveTable("Lines") throws "Unable to remove table
+        ///   'Lines'." and removing its one TableLink first does NOT help -- and "CompanyInfo",
+        ///   which has no links at all, is refused identically. Crystal's refusal is driven by
+        ///   other in-report references (that report binds its fields through formulas), not by
+        ///   links, so a speculative link-removal step would only destroy real links without ever
+        ///   rescuing the removal.
+        ///
+        /// Needs no database connection: this rewrites the report's own binding metadata only.
+        /// </summary>
+        private static string RemoveTable(ISCDReportClientDocument doc, string alias)
+        {
+            var table = RequireTable(doc, alias, LayoutActions.RemoveTable);
+            var canonical = table.Alias;
+
+            try
+            {
+                doc.DatabaseController.RemoveTable(canonical);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"removeTable\" for \"{alias}\": {ex.Message.Trim()} " +
+                    "Crystal refuses to remove a table that something else in the report still " +
+                    "refers to -- most often a formula, a record-selection formula, a group or a " +
+                    "sort. Those are outside what this tool can edit, so such a table has to be " +
+                    "detached in the Crystal Designer.", ex);
+            }
+
+            return canonical;
+        }
+
+        /// <summary>
+        /// Adds a table or stored procedure to the report's data source, cloning the connection of
+        /// a table already present so no credential is ever expressed in a plan.
+        ///
+        /// MEASURED LIMITATION, and it is a real one: AddTable always contacts the database
+        /// server. Against out/reports/PMSV10_GoalAlignCascade.rpt it throws COMException "Logon
+        /// failed. Unable to connect: incorrect log on parameters." -- because Crystal persists a
+        /// connection's UserName but never its Password. That was measured across every variation
+        /// that could plausibly matter (ProcedureClass and TableClass; a three-part qualified name,
+        /// a bare one, and the source table's verbatim; parameters cloned from the source and left
+        /// empty; and a full src.Clone(true) carrying the source's DataFields), and the failure was
+        /// identical every time -- the call never gets far enough for the table's shape to matter.
+        /// So addTable can only succeed where the report's saved connection logs on unattended
+        /// (integrated security, or a connection with no password). See docs/sdk-notes.md.
+        /// </summary>
+        private static void AddTable(ISCDReportClientDocument doc, LayoutOperation op)
+        {
+            var source = RequireTable(doc, op.Target, LayoutActions.AddTable);
+
+            if (FindTable(doc, op.NewName) != null)
+                throw new InvalidOperationException(
+                    $"\"addTable\": a table with the alias \"{op.NewName}\" is already in this report's data source.");
+
+            // ProcedureClass when the source is a stored procedure, TableClass otherwise: mirror
+            // the shape the report already uses rather than picking one. Every table in the
+            // driving reports is a Procedure (ClassName "CrystalReports.Procedure").
+            ISCRTable table = source is ISCRProcedure ? (ISCRTable)new ProcedureClass() : new TableClass();
+
+            // The ONLY thing taken from the source table. Clone(true) is a deep copy, so the new
+            // table does not alias the existing one's connection object.
+            table.ConnectionInfo = (ConnectionInfo)source.ConnectionInfo.Clone(true);
+            table.Name = op.TableName;
+            table.Alias = op.NewName;
+            table.QualifiedName = QualifiedNameFor(source, op.TableName);
+
+            // Parameters are left unset. A stored procedure's declared parameters come from the
+            // server, and nothing measurable says they must be supplied up front -- the logon
+            // failure above happens before any parameter handling could be reached, so this is
+            // recorded as unmeasured rather than as established fact.
+
+            try
+            {
+                // RelatedTableLinks is null: this adds an UNLINKED table. Measured that Crystal
+                // maintains TableLinks itself when a table is removed, and nothing suggests a link
+                // is required to add one.
+                doc.DatabaseController.AddTable(table, null);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"addTable\" for \"{op.NewName}\" ({op.TableName}): {ex.Message.Trim()} " +
+                    "Adding a table makes Crystal connect to the database to verify it. The connection " +
+                    "cloned from \"" + op.Target + "\" carries the report's saved server, database and user " +
+                    "name but NOT its password -- Crystal does not persist passwords, and Vibey Reports " +
+                    "deliberately never accepts a credential in a layout plan. So addTable only works where " +
+                    "the report's saved connection can log on unattended. To combine a second data source " +
+                    "without a logon, embed it as a sub-report (addSubreport), which brings its own " +
+                    "connection with it.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Repoints an existing table at a different database object on the SAME connection: the
+        /// clone keeps the original ConnectionInfo untouched, so server, database and credentials
+        /// cannot change.
+        ///
+        /// Carries the same measured logon requirement as AddTable -- SetTableLocation against
+        /// out/reports/PMSV10_GoalAlignCascade.rpt throws COMException "Logon failed." for the same
+        /// reason. See docs/sdk-notes.md.
+        /// </summary>
+        private static void SetTableLocation(ISCDReportClientDocument doc, LayoutOperation op)
+        {
+            var current = RequireTable(doc, op.Target, LayoutActions.SetTableLocation);
+
+            // Clone(true) copies the ConnectionInfo along with everything else, so the repointed
+            // table keeps exactly the connection it had. Only Name/QualifiedName change; Alias is
+            // deliberately left alone, since every report object binds through the alias.
+            var replacement = current.Clone(true);
+            replacement.Name = op.TableName;
+            replacement.QualifiedName = QualifiedNameFor(current, op.TableName);
+
+            try
+            {
+                doc.DatabaseController.SetTableLocation(current, replacement);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"setTableLocation\" for \"{op.Target}\" -> \"{op.TableName}\": " +
+                    $"{ex.Message.Trim()} Repointing a table makes Crystal connect to the database to verify " +
+                    "the new object. The report's saved connection carries a server, database and user name " +
+                    "but no password (Crystal does not persist one), and Vibey Reports deliberately never " +
+                    "accepts a credential in a layout plan, so this only works where the saved connection can " +
+                    "log on unattended.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Builds the new table's QualifiedName by keeping the source table's catalog/schema prefix
+        /// and substituting the new object name. Measured shape on the driving reports:
+        /// Name and Alias are both "sp_perf_goal_align_cascade;1" and QualifiedName is
+        /// "hrmmain_philippinesdev.PeoplesHR.sp_perf_goal_align_cascade;1" -- i.e. the qualified
+        /// name ENDS WITH the name, ";1" overload suffix included. Replacing that suffix (rather
+        /// than splitting on the last '.') is what keeps the ";1" intact.
+        /// </summary>
+        private static string QualifiedNameFor(ISCRTable source, string tableName)
+        {
+            var qualified = source.QualifiedName ?? "";
+            var name = source.Name ?? "";
+
+            if (name.Length > 0 && qualified.EndsWith(name, StringComparison.OrdinalIgnoreCase))
+                return qualified.Substring(0, qualified.Length - name.Length) + tableName;
+
+            var dot = qualified.LastIndexOf('.');
+            return dot >= 0 ? qualified.Substring(0, dot + 1) + tableName : tableName;
         }
 
         /// <summary>

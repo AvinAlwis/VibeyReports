@@ -67,7 +67,13 @@ public class ReportToolsTests
         var schemaJson = await Tools().ReadReport(mainPath, CancellationToken.None);
         var schema = JsonSerializer.Deserialize<ReportSchema>(schemaJson, VibeyJson.Options)!;
         var sectionName = schema.Sections.First(s => s.Kind == "Details" && s.HeightTwips >= 400).Name;
-        var mainField = schema.AvailableFields.First().FormulaForm;
+        // Crystal TYPE-CHECKS a sub-report link's field pair and refuses a mismatch at save time
+        // with COM "Invalid value type." (measured -- see docs/sdk-notes.md). AvailableFields.First()
+        // on this fixture is {sp_perf_ind_perf_overview;1.performance_cycle_id}, a Number, and the
+        // sub-report field below ({Command.CardCode}) is a String, so taking whatever field happens
+        // to come first made this test fail for a reason that had nothing to do with what it tests.
+        // Pick a String field deliberately, to match the String sub-report field.
+        var mainField = schema.AvailableFields.First(f => f.ValueType == "String").FormulaForm;
 
         var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
         var planJson = JsonSerializer.Serialize(new LayoutPlan

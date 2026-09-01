@@ -117,17 +117,33 @@ worker; a failed probe writes to stderr and exits 1.)
 
 `move`, `resize`, `setFont`, `setFontSize`, `setBold`, `setAlignment`, `addText`, `addLine`,
 `addBox`, `resizeSection`, `addField`, `removeObject`, `setTextColor`, `setFillColor`,
-`setLineColor`, `setSectionBackground`.
+`setLineColor`, `setSectionBackground`, `addSubreport`, `setSubreportLink`, `removeTable`,
+`addTable`, `setTableLocation` — twenty-one in all (`LayoutActions.All`).
 
-Layout only. Database connections, SQL, formulas, parameters, record selection and grouping
-cannot be changed; `LayoutPlanValidator` rejects any attempt. `addField`'s `fieldRef` is the
-one operation with its own security boundary: it must exactly match a `formulaForm` already
-exposed by the report's own data source (see `ReportSchema.AvailableFields`) — it cannot be
-used to add new tables, formulas, or connections. `removeObject` permanently removes an object
-from the generated report — including a bound field, which deletes that data from the
-output — though the source `.rpt` is never modified. The four colour operations
-(`setTextColor`, `setFillColor`, `setLineColor`, `setSectionBackground`) take a `color` of the
-form `#RRGGBB`.
+Layout and data-source bindings. SQL, formulas, parameters, record selection and grouping cannot
+be changed; `LayoutPlanValidator` rejects any attempt. **The database is only ever read** — the
+three table operations rewrite the report's own binding metadata and nothing else, and **no
+operation accepts a username or password**, ever (plans are JSON files on disk; `addTable` clones
+the connection of a table already in the report instead).
+
+`addField`'s `fieldRef` has its own security boundary: it must exactly match a `formulaForm`
+already exposed by the report's own data source (see `ReportSchema.AvailableFields`).
+`removeObject` permanently removes an object from the generated report — including a bound field,
+which deletes that data from the output — though the source `.rpt` is never modified. The four
+colour operations (`setTextColor`, `setFillColor`, `setLineColor`, `setSectionBackground`) take a
+`color` of the form `#RRGGBB`.
+
+`removeTable` is the answer to a report bound to two unrelated tables with no link between them,
+which Crystal renders as a cartesian join. Its `target` is a table **alias**, not an object name.
+Crystal itself will remove such a table *and silently delete every object bound to it* (measured —
+see `docs/sdk-notes.md`), so the validator refuses while any bound object survives; remove those
+objects earlier in the same plan and the removal is accepted. Removed aliases come back in the
+response as `removedTables`.
+
+`addTable` and `setTableLocation` **make Crystal connect to the database** to verify the object,
+and a saved Crystal connection carries a user name but never a password. They therefore fail with
+"Logon failed" on any report whose connection needs one, and work only where it can log on
+unattended. `addSubreport` is the credential-free way to combine a second data source.
 
 ## Tests
 

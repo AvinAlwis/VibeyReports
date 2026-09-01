@@ -1297,6 +1297,436 @@ public class LayoutPlanValidatorTests
 
         result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
     }
+
+    // ---- data-source table operations ------------------------------------
+    //
+    // Shaped after out/reports/PMSV10_GoalAlignCascade.rpt, which is bound to three stored
+    // procedures. "sp_perf_goal_align_detail;1" is the redundant one -- two unlinked procedures in
+    // one report is a cartesian join -- and five Field objects (DR0..DR4 in the real report, two
+    // here) are bound to it. Measured against the real SDK: Crystal's own RemoveTable removes such
+    // a table WITHOUT complaint, leaving those fields unresolvable, so this validator is the only
+    // thing standing between a model and a broken report.
+
+    private const string Cascade = "sp_perf_goal_align_cascade;1";
+    private const string Detail = "sp_perf_goal_align_detail;1";
+
+    private static ReportSchema TableSchema()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "DR0", Kind = "Field", LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200,
+            DataSource = "{" + Detail + ".goal_id}"
+        });
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "DR1", Kind = "Field", LeftTwips = 600, TopTwips = 0, WidthTwips = 500, HeightTwips = 200,
+            DataSource = "{" + Detail + ".goal_name}"
+        });
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "B1L0v", Kind = "Field", LeftTwips = 0, TopTwips = 600, WidthTwips = 500, HeightTwips = 100,
+            DataSource = "{" + Cascade + ".employee_name}"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "goal_id", FormulaForm = "{" + Detail + ".goal_id}",
+            TableAlias = Detail, ValueType = "Number", HeadingText = "Goal Id"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "employee_name", FormulaForm = "{" + Cascade + ".employee_name}",
+            TableAlias = Cascade, ValueType = "String", HeadingText = "Employee Name"
+        });
+        return schema;
+    }
+
+    [Fact]
+    public void Validate_AcceptsRemoveTableWhenNothingIsBoundToTheAlias()
+    {
+        var schema = TableSchema();
+        // "Command" is a real alias in the shared fixture with no object bound to it.
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableWhileABoundFieldSurvives_AndNamesTheObjects()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("DR0").And.Contain("DR1");
+    }
+
+    /// <summary>
+    /// The actual use case, and the reason the simulation has to be cumulative: strip the bound
+    /// fields, then drop the table they came from, in one plan.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsRemoveTableWhenThePlanRemovesTheBoundFieldsFirst()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// Removing only SOME of the bound fields must still be refused, or the "cumulative" handling
+    /// above would just be a blanket exemption for any plan that happens to contain a removeObject.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsRemoveTableWhenOnlySomeBoundFieldsAreRemovedFirst()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("DR1").And.NotContain("DR0");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableWithNoTarget()
+    {
+        foreach (var target in new string?[] { null, "", "   " })
+        {
+            var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = target });
+
+            var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+            result.IsValid.Should().BeFalse();
+            result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"target\"");
+        }
+    }
+
+    /// <summary>
+    /// ReportReader deliberately clears AvailableFields when field enumeration cannot reach the
+    /// database -- a normal, supported state. Absence cannot be proven from an empty list, so the
+    /// existence check is skipped rather than rejecting every table operation.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsTableOperationsWhenAvailableFieldsIsEmpty()
+    {
+        var schema = TableSchema();
+        schema.AvailableFields.Clear();
+
+        // removeTable LAST on purpose: once an alias has been removed by the plan, referring to it
+        // again is a plan error even with an unknown alias set, and that ordering rule is correct.
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddTable, Target = "who_knows;1", TableName = "sp_y;1", NewName = "sp_y;1"
+            },
+            new LayoutOperation { Action = LayoutActions.SetTableLocation, Target = "who_knows;1", TableName = "sp_x;1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "who_knows;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// Rule 1 still bites with an empty AvailableFields: the bound-object check reads the report's
+    /// own objects, not the field list, so a missing database connection must not turn the one
+    /// safety rule off.
+    /// </summary>
+    [Fact]
+    public void Validate_StillRejectsARemoveTableWithBoundObjectsWhenAvailableFieldsIsEmpty()
+    {
+        var schema = TableSchema();
+        schema.AvailableFields.Clear();
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("DR0");
+    }
+
+    /// <summary>
+    /// A sub-report carries its OWN data source and is never bound to a main report's tables, so
+    /// its DataSource is null. Without this pinned, embedding a sub-report could silently make its
+    /// host's tables unremovable.
+    /// </summary>
+    [Fact]
+    public void Validate_ASubreportDoesNotBlockRemoveTable()
+    {
+        var schema = TableSchema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "Subreport1", Kind = "Subreport", SubreportName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// A plain Contains would let alias "foo;1" match "{other_foo;1.x}" and refuse a legal
+    /// removal. The match is the prefix "{" + alias + "." specifically.
+    /// </summary>
+    [Fact]
+    public void Validate_AliasMatchingIsNotFooledByASubstringOfAnotherAlias()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "OtherField", Kind = "Field", LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 100,
+            DataSource = "{other_foo;1.x}"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "x", FormulaForm = "{foo;1.x}", TableAlias = "foo;1", ValueType = "String"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "x", FormulaForm = "{other_foo;1.x}", TableAlias = "other_foo;1", ValueType = "String"
+        });
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "foo;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>The formula form is case-insensitive in Crystal; the match must be too.</summary>
+    [Fact]
+    public void Validate_AliasMatchingIsCaseInsensitive()
+    {
+        var schema = TableSchema();
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.RemoveTable, Target = "SP_PERF_GOAL_ALIGN_DETAIL;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("DR0");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableForAnAliasThatIsNotInTheDataSource()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_nope;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTableThenRemoveTableOfTheSameAlias()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddTable, Target = Cascade,
+                TableName = "sp_perf_goal_align_history;1", NewName = "sp_perf_goal_align_history;1"
+            },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_perf_goal_align_history;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAnAddFieldReferencingATableRemovedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = "Section3", NewName = "NewGoalId",
+                FieldRef = "{" + Detail + ".goal_id}",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("is not a field in this report's data source");
+    }
+
+    /// <summary>
+    /// A field added by an earlier addField binds to a table just as a pre-existing one does, so
+    /// the SimObject must carry its fieldRef as a DataSource or the removeTable check has a hole.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsRemoveTableWhenAFieldAddedEarlierInThePlanIsBoundToIt()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = "Section3", NewName = "NewGoalId",
+                FieldRef = "{" + Detail + ".goal_id}",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200
+            },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("NewGoalId");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableOnAnAliasCollision()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, TableName = "sp_x;1", NewName = Detail
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already in this report's data source");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWithoutTableName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, NewName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"tableName\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWithoutNewName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, TableName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"newName\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWhoseSourceAliasDoesNotExist()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = "sp_nope;1", TableName = "sp_new;1", NewName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTableLocationOnAnUnknownTarget()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetTableLocation, Target = "sp_nope;1", TableName = "sp_x;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTableLocationWithoutTableName()
+    {
+        foreach (var name in new string?[] { null, "", "  " })
+        {
+            var plan = PlanOf(new LayoutOperation
+            {
+                Action = LayoutActions.SetTableLocation, Target = Detail, TableName = name
+            });
+
+            var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+            result.IsValid.Should().BeFalse();
+            result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"tableName\"");
+        }
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetTableLocationOnAKnownTable()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetTableLocation, Target = Detail, TableName = "sp_perf_goal_align_detail_v2;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// A table operation's target lives in the TABLE-ALIAS name-space, not the report-object one.
+    /// If removeTable were wired into the shared needsTarget block it would resolve the alias
+    /// against the object dictionary and reject every table operation with "Object ... does not
+    /// exist in the report."
+    /// </summary>
+    [Fact]
+    public void Validate_ResolvesATableTargetInTheTableNameSpaceNotTheObjectOne()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// The converse: an OBJECT name must not accidentally resolve as a table alias.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsARemoveTableTargetingAReportObjectName()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "CustomerName" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
 }
 
 internal static class PlanExtensions

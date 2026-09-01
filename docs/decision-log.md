@@ -1026,3 +1026,117 @@ applier's "file not found" message name a path the agent never wrote.
 **Ruling:** `Path.IsPathRooted` is pure string arithmetic with no file I/O, so it sits beside the
 `.rpt` suffix check in the validator without breaking the "validator does no file I/O" rule. The
 *existence* check stays in the applier, as before.
+
+---
+
+## Data-source operations: the database-controller boundary is lifted (2026-09-01, user)
+
+Every brief before this one carried the constraint *"Do not touch the database controller.
+Changing a report's data sources is outside this tool's remit."* **The user has explicitly lifted
+it**, on the reasoning that `removeTable`/`addTable`/`setTableLocation` never write to SQL Server —
+they only change the report's own binding metadata, and the database itself stays read-only
+throughout.
+
+**The boundary is now: report metadata may be WRITTEN; the database is only ever READ.**
+
+Still out of scope, and deliberately so: `ModifyTableConnectionInfo`,
+`SetTableLocationByServerDatabaseName`, `LogonEx`, `SetDataSource`, `ReplaceConnection` — anything
+that carries or changes a connection.
+
+### The credential rule (hard, permanent)
+
+**No layout operation may ever accept a username or password.** Plans are JSON files written to
+disk and quoted verbatim in documentation and bug reports; they must never become a place a
+credential is recorded. `ISCRConnectionInfo` exposes `UserName` and `Password`, and neither is read
+or written anywhere in `LayoutApplier`. `addTable` sidesteps the question entirely by CLONING the
+`ConnectionInfo` of a table already in the report, and `setTableLocation` leaves the table's own
+`ConnectionInfo` untouched.
+
+Measured while implementing this (`docs/sdk-notes.md`): the customer's reports **do** persist a
+connection user name (`sgdev01db01_devlogin`) but never a password. So the rule is not theoretical
+tidiness — a plan format with a `userName` field would have made a real credential routinely
+copy-pasteable.
+
+### Ruling — `removeTable`'s validator rule is the mechanism, not a nicety
+
+The brief expected Crystal might refuse to remove a table with objects still bound to it. Measured:
+it does not refuse, it **cascade-deletes the bound objects silently** (70 → 59 → 54 → 53 report
+objects across the three tables of `PMSV10_GoalAlignCascade.rpt`; the five `DR*` fields bound to
+`sp_perf_goal_align_detail;1` simply vanish). Nothing warns, and `RemovedObjects` cannot report them
+because no `removeObject` was ever issued.
+
+So `LayoutPlanValidator`'s refusal is the only thing standing between a model-authored plan and
+silent data destruction. Cost if wrong: a report loses objects nobody asked to remove, in a way the
+response does not disclose.
+
+### Ruling — the three table operations do NOT join the object `needsTarget` block
+
+The brief said all three "join `needsTarget`". Taken literally that resolves a table alias against
+the report-OBJECT dictionary and rejects every table operation with *"Object ... does not exist in
+the report."* — the exact trap the sub-report work hit with `setSubreportLink`. A report has three
+name-spaces: object names, `SubreportName`s, and table aliases. The three operations require a
+non-empty `target` (which is what the brief was after) but resolve it against the table-alias set.
+Cost if wrong: none; the requirement the brief stated is still enforced.
+
+### Ruling — no speculative `RemoveTableLink` pre-step
+
+The brief asked whether a table in a `TableLink` must have the link removed first. Measured both
+ways and the answer is no: a linked table removes cleanly and Crystal drops the link itself
+(`TableLinks` 1 → 0), while a refusal is *not* cured by removing the link (`Documents.rpt` refuses
+`Lines` before and after, and refuses the link-free `CompanyInfo` identically). A speculative
+link-removal step would destroy real links without ever unblocking anything, so there is none.
+Crystal's refusal is wrapped instead, with the real cause named (formula / record selection / group
+/ sort).
+
+### Ruling — `addTable` and `setTableLocation` ship, with the limitation stated loudly
+
+Measured: both **always contact the database server** and fail with
+`COMException: Logon failed. Unable to connect: incorrect log on parameters.` on every report here,
+because Crystal persists a connection's user name but not its password. This held across
+`ProcedureClass` vs `TableClass`, three `QualifiedName` shapes, parameters cloned and not, and a
+full `source.Clone(true)` — the call never gets far enough for the table's shape to matter.
+
+The brief anticipated this outcome and required it to be reported and documented rather than to
+block the work, so both operations ship with:
+- an applier error message that names the cause (cloned connection has no password; this tool never
+  accepts credentials) and points at `addSubreport` as the credential-free alternative;
+- the same statement in the `apply_layout` tool description, so the agent does not retry blindly.
+
+**Flagged to the user for a product decision:** on the customer's own reports these two operations
+cannot succeed, so they may not be worth their surface area. `removeTable` — the driving case — is
+unaffected and works fully offline.
+
+Consequence for tests: neither operation gets a live round-trip test. A success test would need a
+fixture whose saved connection logs on unattended (none exists), and a failure test would open a
+real network connection — which, with the VPN down, **blocks rather than fails** (post-merge finding
+PM1). Their offline guards are tested instead, and the live behaviour is recorded in
+`docs/sdk-notes.md`.
+
+### Three pre-existing red tests fixed in the same commit
+
+The user's Visual Studio run at `ca00e00` was 218 tests, 214 passed, 4 failed. Three were in files
+this task edits and were fixed here.
+
+1. `LayoutActions_All_ContainsExactlyTheSixteenActions` — never updated when `addSubreport`/
+   `setSubreportLink` took `All` to eighteen. Renamed to
+   `LayoutActions_All_ContainsEverySupportedActionAndNothingElse`: the old name hardcoded the count,
+   which is *why* it rotted silently — the name stopped describing the test long before anyone
+   noticed the test was red.
+2. `ReadReport_JsonIncludesSubreportLinksForASubreportObject` — failed with COM
+   *"Invalid value type."* It took `AvailableFields.First()`, which on `PMSV10_IndPerfOverview.rpt`
+   is `performance_cycle_id` (**Number**), and linked it to `{Command.CardCode}` (**String**).
+   Crystal type-checks link field pairs (measured, recorded at `ca00e00`). Now picks a String field
+   deliberately. Verified end-to-end through the real worker: `ok:true`, one link read back.
+3. `Apply_LinksASubreportThatWasAlreadyEmbeddedByAnEarlierPlan` — *"Sequence contains more than one
+   matching element"*. The test's premise was wrong, not just its LINQ:
+   `PMSV10_IndPerfOverview.rpt` **already embeds two sub-reports of its own** (`Subreport1` /
+   `"company logo"` in the page header, `Subreport2` / `"stage wise eval"` in the details band), so
+   after the test embeds a third, `Single(o => o.Kind == "Subreport")` matches three. Fixed by
+   selecting on `SubreportName == "VibeyGoalDetail"` — which is also the stronger assertion, since
+   it proves the sub-report is addressable by the `newName` the plan chose rather than assuming
+   there is only one to find. Verified against the real worker: the saved report reads back
+   `Subreport1/"company logo"`, `Subreport2/"stage wise eval"`, `Subreport3/"McpLinkedSubreport"`.
+
+The fourth failure (`ExportPdf_ProducesAValidPdfForEveryRenderableFixture("SampleReport.rpt")`,
+*"The process cannot access the file because it is being used by another process"*) was left alone
+as instructed — file contention with concurrent probing, matching post-merge finding PM3.

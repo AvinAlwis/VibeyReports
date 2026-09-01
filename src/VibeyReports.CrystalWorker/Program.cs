@@ -116,6 +116,7 @@ namespace VibeyReports.CrystalWorker
                         var response = WorkerResponse.Success();
                         response.OperationsApplied = applyResult.OperationsApplied;
                         response.RemovedObjects = applyResult.RemovedObjects;
+                        response.RemovedTables = applyResult.RemovedTables;
                         response.OutputPath = Path.GetFullPath(request.OutputPath);
                         // Final review F4: schema.ReportPath was ReportReader.Read's session.SourcePath
                         // (the SOURCE .rpt), even though apply_layout's own description warns at length
