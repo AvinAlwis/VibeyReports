@@ -19,9 +19,20 @@ public class LayoutApplierTests
     /// source .rpt was never touched -- "the source must never be modified" is a global constraint,
     /// and every test in this file that goes through this helper mutates a session opened directly
     /// on one of the fixtures under tests/fixtures (Fixtures.SampleReport by default, or another
-    /// fixture passed via sourcePath), so checking it here covers all of them for free.
+    /// fixture passed via sourcePath), so checking it here covers all of them for free. Delegates
+    /// to <see cref="ApplyAndRereadWithResult"/> so the never-touch-the-source assertion lives in
+    /// exactly one place and cannot drift between the two helpers.
     /// </summary>
     private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath, string sourcePath = null)
+        => ApplyAndRereadWithResult(plan, out _, out savedPath, sourcePath);
+
+    /// <summary>
+    /// Same shape as <see cref="ApplyAndReread"/> (including the never-touch-the-source assertion)
+    /// but also hands back the <see cref="LayoutApplier.ApplyResult"/> itself, needed by the
+    /// removeObject tests to assert on RemovedObjects rather than only the resulting schema.
+    /// </summary>
+    private static ReportSchema ApplyAndRereadWithResult(
+        LayoutPlan plan, out LayoutApplier.ApplyResult result, out string savedPath, string sourcePath = null)
     {
         sourcePath = sourcePath ?? Fixtures.SampleReport;
         var sourceBefore = File.ReadAllBytes(sourcePath);
@@ -29,7 +40,7 @@ public class LayoutApplierTests
         var dest = TempRpt();
         using (var session = CrystalSession.Open(sourcePath))
         {
-            LayoutApplier.Apply(session, plan);
+            result = LayoutApplier.Apply(session, plan);
             session.SaveAs(dest, overwrite: false);
         }
 
@@ -49,6 +60,23 @@ public class LayoutApplierTests
             .SelectMany(s => s.Objects)
             .First(o => o.Kind == "Text" || o.Kind == "Field")
             .Name;
+    }
+
+    /// <summary>
+    /// Up to <paramref name="count"/> distinct Text/Field object names from SampleReport.rpt, for
+    /// tests that need several independent targets in one plan (e.g. a mixed removeObject plan).
+    /// </summary>
+    private static List<string> DistinctTextOrFieldNames(int count)
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var schema = ReportReader.Read(session);
+        return schema.Sections
+            .SelectMany(s => s.Objects)
+            .Where(o => o.Kind == "Text" || o.Kind == "Field")
+            .Select(o => o.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(count)
+            .ToList();
     }
 
     /// <summary>
@@ -308,7 +336,7 @@ public class LayoutApplierTests
 
         using var session = CrystalSession.Open(Fixtures.SampleReport);
 
-        LayoutApplier.Apply(session, plan).Should().Be(2);
+        LayoutApplier.Apply(session, plan).OperationsApplied.Should().Be(2);
     }
 
     [Fact]
@@ -818,5 +846,829 @@ public class LayoutApplierTests
                          "Text objects rather than default to Arial");
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    // --- removeObject ---
+
+    /// <summary>
+    /// Removes a real object from a fixture, saves, reopens, and confirms it is gone from the
+    /// returned schema while every other object survives -- the core removeObject contract, and
+    /// the reason ApplyAndRereadWithResult still runs the source-byte-identical check every other
+    /// test in this file relies on.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesAnObjectAndItIsAbsentAfterReopenWhileOthersSurvive()
+    {
+        List<string> namesBefore;
+        string toRemove;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            namesBefore = before.Sections.SelectMany(x => x.Objects).Select(o => o.Name).ToList();
+            toRemove = before.Sections.SelectMany(x => x.Objects).First(o => o.Kind == "Text" || o.Kind == "Field").Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out _, out var saved);
+        try
+        {
+            var namesAfter = schema.Sections.SelectMany(s => s.Objects).Select(o => o.Name).ToList();
+            namesAfter.Should().NotContain(toRemove);
+            namesAfter.Should().BeEquivalentTo(namesBefore.Where(n => n != toRemove),
+                because: "every object other than the removed one must survive untouched");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The reporting half of the task: ApplyResult.RemovedObjects must name what was destroyed so
+    /// an AI agent (and the user) can see it, since OperationsApplied alone cannot distinguish a
+    /// removal from any other kind of operation.
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsTheRemovedObjectNameInApplyResult()
+    {
+        var toRemove = FirstTextOrFieldName();
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
+        };
+
+        ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(1);
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F1: every other removeObject test uses a single-operation plan, so a regression
+    /// that reports every operation's target as removed (not just removeObject's) would still
+    /// pass them all -- e.g. moving `result.RemovedObjects.Add(op.Target!)` out of the switch's
+    /// RemoveObject case and below the whole switch. A plan with a non-removal operation plus two
+    /// removals catches that: OperationsApplied must count all three, and RemovedObjects must be
+    /// exactly the two removed names, in order -- not the bold target, not duplicated, not just
+    /// the last one.
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsExactlyTheRemovedObjectsFromAMixedPlanInOrder()
+    {
+        var names = DistinctTextOrFieldNames(3);
+        names.Should().HaveCountGreaterThanOrEqualTo(3,
+            because: "this test needs three distinct Text/Field objects on SampleReport.rpt: one to " +
+                     "restyle and leave in place, two to remove");
+        var keep = names[0];
+        var removeFirst = names[1];
+        var removeSecond = names[2];
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.SetBold, Target = keep, Bold = true },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = removeFirst },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = removeSecond }
+            }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(3);
+            result.RemovedObjects.Should().Equal(
+                new List<string> { removeFirst, removeSecond },
+                because: "RemovedObjects must name exactly the two removed objects, in order -- " +
+                         "not the setBold target, which was only restyled");
+
+            var namesAfter = schema.Sections.SelectMany(s => s.Objects).Select(o => o.Name).ToList();
+            namesAfter.Should().Contain(keep, because: "the setBold target was never removed");
+            namesAfter.Should().NotContain(removeFirst);
+            namesAfter.Should().NotContain(removeSecond);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F5: FindObject matches OrdinalIgnoreCase, so a plan targeting a different casing
+    /// than the report's own object name must still report the report's canonical Name in
+    /// RemovedObjects, not the caller-supplied casing (AddField already does this for the same
+    /// reason).
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsRemovedObjectUsingTheReportsCanonicalNameNotTheCallersCasing()
+    {
+        var toRemove = FirstTextOrFieldName();
+        var differentCasing = toRemove.ToUpperInvariant();
+        differentCasing.Should().NotBe(toRemove,
+            because: "the fixture's object name must contain a lowercase letter for this test to " +
+                     "actually exercise a casing mismatch");
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = differentCasing } }
+        };
+
+        ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove,
+                because: "RemovedObjects must echo the report's canonical name, not the caller's casing");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F2: the apply_layout description promises removeObject works on Field/Text plus
+    /// Subreport/Chart/Crosstab, but every other test here selects a Text or Field target. This
+    /// proves a third kind (Line) is genuinely accepted by RAS, and simultaneously exercises the
+    /// previously-untested "remove an object added earlier in the same plan" ordering case.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesALineAddedEarlierInTheSamePlan()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName, NewName = "VibeyRemoveMeLine",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 0 },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "VibeyRemoveMeLine" }
+            }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(2);
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be("VibeyRemoveMeLine");
+            schema.Sections.SelectMany(s => s.Objects).Should().NotContain(o => o.Name == "VibeyRemoveMeLine");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    // --- colour operations ---
+
+    /// <summary>
+    /// setTextColor writes FontColor.Color; ReportReader.ToHex reads it back through the same
+    /// ColorRef helper, so this is the round-trip that proves the write and read halves agree
+    /// with each other (independent of whether the COLORREF channel-order hypothesis itself is
+    /// right -- that is what the swatch report settles).
+    /// </summary>
+    [Fact]
+    public void Apply_SetsTextColorAndItSurvivesSaveAndReopen()
+    {
+        var name = FirstTextOrFieldName();
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.SetTextColor, Target = name, Color = "#1F2A37" } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == name)
+                  .TextColorHex.Should().Be("#1F2A37");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsSectionBackgroundAndItSurvivesSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First().Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = sectionName, Color = "#1F2A37" } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.Single(s => s.Name == sectionName).BackgroundColorHex.Should().Be("#1F2A37");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsBoxFillAndLineColorAndBothSurviveSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddBox, Section = sectionName, NewName = "VibeyColourBox",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 340 },
+                new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "VibeyColourBox", Color = "#00AA00" },
+                new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "VibeyColourBox", Color = "#0000FF" }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var box = schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == "VibeyColourBox");
+            box.FillColorHex.Should().Be("#00AA00");
+            box.LineColorHex.Should().Be("#0000FF");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsLineColorOnALine()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName, NewName = "VibeyColourRule",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 0 },
+                new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "VibeyColourRule", Color = "#FF0000" }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == "VibeyColourRule")
+                  .LineColorHex.Should().Be("#FF0000");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    // --- addSubreport / setSubreportLink ---
+
+    /// <summary>
+    /// Imports tests/fixtures/SampleReport.rpt as a sub-report into PMSV10_IndPerfOverview.rpt and
+    /// asserts an object of kind Subreport exists at the requested geometry after save/reopen.
+    /// Measured (see task report): ImportSubreportEx's "Name" argument becomes
+    /// ISCRSubreportObject.SubreportName, NOT the placed report OBJECT's own Name -- Crystal
+    /// auto-numbers the container object itself ("Subreport3" here, since the fixture already has
+    /// two). So this locates the added object by kind+geometry rather than by NewName, which would
+    /// never match.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsASubreportAndItExistsAtTheRequestedGeometryAfterSaveAndReopen()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyGoalDetail",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 100, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                .SingleOrDefault(o => o.Kind == "Subreport" && o.LeftTwips == 100 && o.TopTwips == 20
+                                       && o.WidthTwips == 3000 && o.HeightTwips == 300);
+            added.Should().NotBeNull();
+
+            // F6: asserting added.Kind == "Subreport" here could never fail -- the LINQ predicate
+            // above already filters on exactly that. Assert the two things the predicate does NOT
+            // establish instead. subreportName is the identifier setSubreportLink is keyed by, and
+            // is a DIFFERENT string from the placed object's own auto-numbered Name; reporting it
+            // is what makes an already-embedded sub-report linkable at all.
+            added!.SubreportName.Should().Be("VibeyGoalDetail");
+            added.Name.Should().NotBe("VibeyGoalDetail");
+
+            // Also covers ReportReader.ReadSubreportLinks's otherwise-untested bare catch: a
+            // sub-report with no links yet must read back as an empty list, never as null and
+            // never by failing the whole report read.
+            added.SubreportLinks.Should().NotBeNull().And.BeEmpty();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// F2, the finding the whole review turns on: linking a sub-report that is ALREADY embedded,
+    /// rather than one added by this same plan. Before the fix ObjectInfo carried no SubreportName,
+    /// so the only name a caller could obtain from read_report was the placed object's
+    /// ("Subreport1"), and setSubreportLink against that fails at the COM boundary with the
+    /// unhelpful "This value is write-only."; the sub-report's real name was simply not reachable.
+    ///
+    /// Measured directly against out/reports/PMSV10_GoalAlignCascade.subreport.rpt through the real
+    /// worker process before this test was written: the read reports name="Subreport1",
+    /// subreportName="GoalDetail"; a plan whose only operation is a setSubreportLink targeting
+    /// "GoalDetail" applies ok:true; and the saved report reads back exactly one link. A second
+    /// apply against THAT output appends a second link and keeps the first, which is also what
+    /// proves F3's narrowed COMException tolerance is not silently replacing the collection.
+    /// </summary>
+    [Fact]
+    public void Apply_LinksASubreportThatWasAlreadyEmbeddedByAnEarlierPlan()
+    {
+        const string subLinkField = "{Command.CardCode}";
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string mainLinkField;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+            mainLinkField = schema.AvailableFields.First(f => f.FormulaForm.Contains("emp_display_number")).FormulaForm;
+        }
+
+        // Plan 1: embed the sub-report and nothing else. This stands in for "an earlier
+        // apply_layout call", the case the previous implementation declared unsupported.
+        var embedPlan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyGoalDetail",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 100, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+                }
+            }
+        };
+
+        var embedded = ApplyAndReread(embedPlan, out var embeddedPath, sourcePath);
+        try
+        {
+            // The identity split, read back off a saved file rather than assumed.
+            // Selected by SubreportName, NOT by Kind alone: PMSV10_IndPerfOverview.rpt already
+            // embeds two sub-reports of its own ("company logo" in the page header and "stage wise
+            // eval" in the details band), so a bare Single(o => o.Kind == "Subreport") matched
+            // three objects and threw. Picking the one this plan added is also the stronger
+            // assertion -- it proves the newly embedded sub-report is addressable by the newName
+            // the plan chose, which is the whole point of the test, rather than assuming there is
+            // only one sub-report to find.
+            var subreport = embedded.Sections.SelectMany(s => s.Objects)
+                .Single(o => o.Kind == "Subreport" && o.SubreportName == "VibeyGoalDetail");
+            subreport.SubreportName.Should().Be("VibeyGoalDetail");
+            subreport.Name.Should().NotBe("VibeyGoalDetail");
+
+            // Plan 2 targets the SAVED report by that subreportName -- a name no operation in this
+            // plan created. This is the whole point of reporting SubreportName.
+            var linkPlan = new LayoutPlan
+            {
+                Operations =
+                {
+                    new LayoutOperation
+                    {
+                        Action = LayoutActions.SetSubreportLink,
+                        Target = subreport.SubreportName,
+                        MainReportField = mainLinkField,
+                        SubreportField = subLinkField
+                        // LinkedParameter deliberately omitted: Crystal discards it and substitutes
+                        // "{?Pm-<mainReportField>}", so the validator no longer requires it.
+                    }
+                }
+            };
+
+            var linked = ApplyAndReread(linkPlan, out var linkedPath, embeddedPath);
+            try
+            {
+                var links = linked.Sections.SelectMany(s => s.Objects)
+                                  .Single(o => o.SubreportName == "VibeyGoalDetail").SubreportLinks;
+                links.Should().NotBeNull();
+                links!.Should().ContainSingle();
+                links[0].MainReportFieldName.Should().Be(mainLinkField);
+                links[0].SubreportFieldName.Should().Be(subLinkField);
+                // Measured, not assumed: Crystal substitutes its own parameter for whatever is
+                // written (or, as here, for nothing at all), so assert the substitution rather than
+                // a literal the SDK does not guarantee to preserve.
+                links[0].LinkedParameterName.Should().Contain("?Pm-");
+
+                // F3, the destructive case that only shows up ACROSS applies. SetSubreportLinks
+                // replaces the whole collection, and the old code caught any COMException from
+                // GetSubreportLinks by starting from a fresh one -- which would silently turn this
+                // third plan's append into a replace, discarding the link the second plan wrote,
+                // and still report ok:true. The narrowed tolerance re-reads and requires exactly
+                // one link whenever the fallback is taken, so a real replace now fails loudly
+                // instead. Both links must be present, in order, after a completely separate apply
+                // against an already-linked file.
+                var secondMainField = mainLinkField;
+                using (var s2 = CrystalSession.Open(linkedPath))
+                {
+                    secondMainField = ReportReader.Read(s2).AvailableFields
+                        .First(f => f.FormulaForm.Contains("employee_name")).FormulaForm;
+                }
+
+                var appendPlan = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.SetSubreportLink,
+                            Target = subreport.SubreportName,
+                            MainReportField = secondMainField,
+                            SubreportField = "{Command.CardName}"
+                        }
+                    }
+                };
+
+                var appended = ApplyAndReread(appendPlan, out var appendedPath, linkedPath);
+                try
+                {
+                    var both = appended.Sections.SelectMany(s => s.Objects)
+                                       .Single(o => o.SubreportName == "VibeyGoalDetail").SubreportLinks;
+                    both.Should().NotBeNull();
+                    both!.Should().HaveCount(2, because: "the earlier plan's link must not be discarded");
+                    both[0].MainReportFieldName.Should().Be(mainLinkField);
+                    both[0].SubreportFieldName.Should().Be(subLinkField);
+                    both[1].MainReportFieldName.Should().Be(secondMainField);
+                    both[1].SubreportFieldName.Should().Be("{Command.CardName}");
+                }
+                finally { if (File.Exists(appendedPath)) File.Delete(appendedPath); }
+            }
+            finally { if (File.Exists(linkedPath)) File.Delete(linkedPath); }
+        }
+        finally { if (File.Exists(embeddedPath)) File.Delete(embeddedPath); }
+    }
+
+    /// <summary>
+    /// F3's applier-side guard, driven through the internal validation-free seam because
+    /// LayoutPlanValidator now rejects this shape first (it resolves setSubreportLink's target
+    /// against the schema's subreportName values). Measured: without the guard, an unknown
+    /// sub-report name reaches SetSubreportLinks and fails with COM "This value is write-only." --
+    /// true, but telling the caller nothing about what actually went wrong. SubreportController
+    /// .GetSubreportNames() -- present on the SDK surface but unused until now -- is the authority
+    /// on which names are addressable, so resolve against it first and say what does exist.
+    /// </summary>
+    [Fact]
+    public void Apply_SetSubreportLinkAgainstAnUnknownSubreportNameSaysSoInsteadOfFailingAtCom()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSubreportLink, Target = "NoSuchSubreport",
+                    MainReportField = "{Command.CardCode}", SubreportField = "{Command.CardName}"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<Exception>()
+             .WithMessage("*NoSuchSubreport*is not a sub-report in this report*");
+    }
+
+    /// <summary>
+    /// The priority test for setSubreportLink: SubreportController.SetSubreportLinks replaces the
+    /// ENTIRE link collection for the named sub-report, so a naive "build one link and set it"
+    /// implementation would let the second setSubreportLink call silently discard the first -- a
+    /// report needing both an evaluation-cycle link and an employee-number link would then only
+    /// ever apply the last one, discarding real HR data. Two independent setSubreportLink
+    /// operations must both survive save/reopen, in order.
+    ///
+    /// Round-trips MainReportFieldName/SubreportFieldName exactly. Measured directly against the
+    /// installed 11.5 RAS (three separate probes, not assumed): LinkedParameterName does NOT
+    /// reliably round-trip as given when the target sub-report has no pre-existing parameter by
+    /// that name.
+    ///   1. LinkedParameterName as a bare string (e.g. "@performance_cycle_id") -- SetSubreportLinks
+    ///      itself did not throw, but the SUBSEQUENT SaveAs threw COMException "Invalid value type."
+    ///   2. LinkedParameterName in Crystal's own formula form (e.g. "{?performance_cycle_id}") with
+    ///      matching MainReportFieldName/SubreportFieldName value types -- SetSubreportLinks
+    ///      succeeded and SaveAs succeeded, but on reopen LinkedParameterName came back as
+    ///      Crystal's own auto-generated "{?Pm-&lt;mainReportField&gt;}", not the string given.
+    ///   3. Same as (2), but with a matching CrystalDecisions.ReportAppServer.DataDefModel.
+    ///      ParameterFieldClass pre-registered on the sub-report via
+    ///      DataDefController.ParameterFieldController.Add() before calling SetSubreportLinks --
+    ///      same "Pm-" substitution still happened, so a minimally-constructed ParameterField is
+    ///      not sufficient to make Crystal treat it as the "already exists" case.
+    /// SampleReport.rpt (this fixture's sub-report) defines no parameters of its own, so no fixture
+    /// available to this test avoids the substitution. This asserts the two LinkedParameterName
+    /// values actually persisted are distinct (proving both links are genuinely present, not one
+    /// clobbering the other) rather than an exact literal string Crystal itself does not guarantee
+    /// to preserve. Whether the substituted parameter still feeds a real stored-procedure input
+    /// parameter on a genuinely SP-parameterised sub-report (the customer's actual case) is
+    /// unverified -- see the task report.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsTwoSubreportLinksAndBothSurviveSaveAndReopenInOrder()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string mainField1;
+        string mainField2;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+            mainField1 = schema.AvailableFields.First(f => f.FormulaForm.Contains("emp_display_number")).FormulaForm;
+            mainField2 = schema.AvailableFields.First(f => f.FormulaForm.Contains("employee_name")).FormulaForm;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyLinkedSubreport",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 150, TopTwips = 25, WidthTwips = 3000, HeightTwips = 300
+                },
+                new LayoutOperation
+                {
+                    // setSubreportLink targeting a sub-report added earlier in the same plan --
+                    // the normal usage: SetSubreportLinks/GetSubreportLinks are keyed by the
+                    // sub-report's own name (VibeyLinkedSubreport, exactly the newName above), not
+                    // by the container object's Crystal-assigned name, so "target" here resolves
+                    // correctly without ever needing to know that auto-assigned name.
+                    Action = LayoutActions.SetSubreportLink, Target = "VibeyLinkedSubreport",
+                    MainReportField = mainField1, SubreportField = "{Command.CardCode}",
+                    LinkedParameter = "@performance_cycle_id"
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSubreportLink, Target = "VibeyLinkedSubreport",
+                    MainReportField = mainField2, SubreportField = "{Command.CardName}",
+                    LinkedParameter = "@employee_number"
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                .Single(o => o.Kind == "Subreport" && o.LeftTwips == 150 && o.TopTwips == 25
+                             && o.WidthTwips == 3000 && o.HeightTwips == 300);
+
+            added.SubreportLinks.Should().NotBeNull();
+            added.SubreportLinks!.Should().HaveCount(2,
+                because: "SetSubreportLinks must append, not replace -- two setSubreportLink " +
+                         "calls must leave both links, not just the last one");
+
+            added.SubreportLinks[0].MainReportFieldName.Should().Be(mainField1);
+            added.SubreportLinks[0].SubreportFieldName.Should().Be("{Command.CardCode}");
+
+            added.SubreportLinks[1].MainReportFieldName.Should().Be(mainField2);
+            added.SubreportLinks[1].SubreportFieldName.Should().Be("{Command.CardName}");
+
+            added.SubreportLinks[0].LinkedParameterName.Should().NotBeNullOrEmpty();
+            added.SubreportLinks[1].LinkedParameterName.Should().NotBeNullOrEmpty();
+            added.SubreportLinks[0].LinkedParameterName.Should().NotBe(added.SubreportLinks[1].LinkedParameterName,
+                because: "two distinct links must not have collapsed into the same parameter binding");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+    // ---- data-source table operations ------------------------------------
+    //
+    // Every claim in these tests was measured against the installed 11.5 RAS before it was
+    // written, and two of the measurements contradicted what was expected:
+    //
+    // 1. RemoveTable does not refuse a table that report objects are still bound to -- it
+    //    CASCADE-DELETES them, silently. Measured on out/reports/PMSV10_GoalAlignCascade.rpt:
+    //    removing "sp_perf_goal_align_cascade;1" took the report from 70 objects to 59,
+    //    "sp_perf_goal_align_detail;1" took 59 to 54 (the five DR0..DR4 fields bound to it), and
+    //    "sp_perf_company_logo;1" took 54 to 53. None of those deletions was reported, requested
+    //    or recoverable. LayoutPlanValidator refusing the removal while a bound object survives is
+    //    the ONLY thing that prevents it.
+    // 2. A table that participates in a TableLink needs no link removal first: AddTableLink
+    //    (cascade -> detail) followed by RemoveTable("...detail;1") succeeded, and TableLinks went
+    //    1 -> 0 on its own.
+    //
+    // Crystal does refuse some removals of its own accord -- measured on
+    // tests/fixtures/Documents.rpt and PMSV10_IndPerfOverview.rpt, where formulas/record selection
+    // still reference the table ("There are still fields in the report from this table"). That
+    // path is covered below. Removing the link first does NOT help there, and a table with no
+    // links at all ("CompanyInfo" in Documents.rpt) is refused identically, which is why the
+    // applier has no speculative RemoveTableLink step.
+    //
+    // addTable and setTableLocation have no round-trip test here on purpose: measured, both make
+    // Crystal connect to the database (COMException "Logon failed. Unable to connect: incorrect
+    // log on parameters." on every fixture, because Crystal persists a connection's user name but
+    // never its password). A test that drove them to success would need a fixture whose saved
+    // connection logs on unattended, and one that drove them to failure would open a real network
+    // connection -- which, with the VPN down, blocks rather than fails (post-merge finding PM1).
+    // Their offline guards are tested instead. See docs/sdk-notes.md.
+
+    /// <summary>
+    /// The driving case end to end: strip the objects bound to a table, then drop the table, in
+    /// ONE plan. SampleReport.rpt's only table is "Command" with two bound Field objects.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesADataSourceTableOnceThePlanHasRemovedItsBoundObjects()
+    {
+        string alias;
+        List<string> bound;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            bound = before.Sections.SelectMany(x => x.Objects)
+                          .Where(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + "."))
+                          .Select(o => o.Name).ToList();
+        }
+
+        bound.Should().NotBeEmpty(because: "the fixture must actually exercise the bound-object rule");
+
+        var plan = new LayoutPlan();
+        foreach (var name in bound)
+            plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = name });
+        plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias });
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.RemovedTables.Should().ContainSingle().Which.Should().Be(alias);
+            result.RemovedObjects.Should().BeEquivalentTo(bound);
+            schema.AvailableFields.Select(f => f.TableAlias).Should().NotContain(alias,
+                because: "the table must be gone from the saved report, not just from the in-memory document");
+            schema.Sections.SelectMany(x => x.Objects).Select(o => o.Name).Should().NotIntersectWith(bound);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The rule the whole operation exists for. Crystal itself would accept this and silently
+    /// delete the bound fields (see the block comment above), so the refusal has to come from the
+    /// validator -- and it must name the offending objects, or the agent cannot fix the plan.
+    /// Driven through the public Apply, i.e. the gate production code actually goes through.
+    /// </summary>
+    [Fact]
+    public void Apply_RefusesToRemoveATableWhileAnObjectIsStillBoundToIt()
+    {
+        string alias;
+        string boundName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            boundName = before.Sections.SelectMany(x => x.Objects)
+                              .First(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + ".")).Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias } }
+        };
+
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        Action apply = () => LayoutApplier.Apply(session, plan);
+
+        apply.Should().Throw<LayoutApplier.InvalidPlanException>()
+             .Which.Result.Errors.Should().ContainSingle()
+             .Which.Message.Should().Contain(boundName);
+    }
+
+    /// <summary>
+    /// Crystal's own refusal, wrapped. PMSV10_IndPerfOverview.rpt refuses to give up its only
+    /// table even after every Field object bound to it has been removed -- something else in the
+    /// report (formula, record selection, group or sort) still refers to it, and that is outside
+    /// what this tool can edit. Measured: the COM message is "There are still fields in the report
+    /// from this table.  Please clear them before removing the table." Requires no database.
+    /// </summary>
+    [Fact]
+    public void Apply_WrapsCrystalsOwnRefusalToRemoveATableWithContext()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string alias;
+        List<string> bound;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var before = ReportReader.Read(s);
+            alias = before.AvailableFields.Select(f => f.TableAlias).Distinct().Single();
+            bound = before.Sections.SelectMany(x => x.Objects)
+                          .Where(o => o.DataSource != null && o.DataSource.StartsWith("{" + alias + "."))
+                          .Select(o => o.Name).ToList();
+        }
+
+        var plan = new LayoutPlan();
+        foreach (var name in bound)
+            plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = name });
+        plan.Operations.Add(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = alias });
+
+        using var session = CrystalSession.Open(sourcePath);
+        Action apply = () => LayoutApplier.Apply(session, plan);
+
+        var thrown = apply.Should().Throw<InvalidOperationException>().Which;
+        thrown.Message.Should().Contain("removeTable").And.Contain(alias);
+        thrown.InnerException.Should().BeOfType<System.Runtime.InteropServices.COMException>(
+            because: "the COM message is the part that says WHY Crystal refused, and it must not be discarded");
+    }
+
+    /// <summary>
+    /// The applier's own existence guard, which is NOT redundant with the validator's: the
+    /// validator deliberately skips its table existence check when ReportSchema.AvailableFields is
+    /// empty (no database connection -- absence cannot be proven from an empty list), so an alias
+    /// that does not exist can and does reach the applier. Driven through the internal
+    /// validation-free seam because with this fixture's fields readable the validator would reject
+    /// it first.
+    /// </summary>
+    [Fact]
+    public void Apply_RemoveTableNamesTheAliasesThatDoExistWhenTheTargetDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_not_here;1" } }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*sp_not_here;1*Aliases present*Command*");
+    }
+
+    [Fact]
+    public void Apply_AddTableNamesTheAliasesThatDoExistWhenTheSourceAliasDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddTable, Target = "sp_not_here;1",
+                    TableName = "sp_new;1", NewName = "sp_new;1"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        // Fails before any COM call, so this test never opens a database connection.
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*addTable*sp_not_here;1*Aliases present*Command*");
+    }
+
+    [Fact]
+    public void Apply_AddTableRefusesAnAliasThatIsAlreadyInTheDataSource()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddTable, Target = "Command",
+                    TableName = "sp_new;1", NewName = "Command"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*already in this report's data source*");
+    }
+
+    [Fact]
+    public void Apply_SetTableLocationNamesTheAliasesThatDoExistWhenTheTargetDoesNot()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetTableLocation, Target = "sp_not_here;1", TableName = "sp_new;1"
+                }
+            }
+        };
+
+        Action apply = () => LayoutApplier.ApplyOperationsWithoutValidation(session, plan);
+
+        apply.Should().Throw<InvalidOperationException>()
+             .WithMessage("*setTableLocation*sp_not_here;1*Aliases present*Command*");
     }
 }

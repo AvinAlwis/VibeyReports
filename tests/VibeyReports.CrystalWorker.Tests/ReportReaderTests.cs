@@ -192,6 +192,77 @@ public class ReportReaderTests
         }
     }
 
+    // --- colour reading ---
+
+    /// <summary>
+    /// Measured (this task, via a standalone probe against Documents.rpt, PMSV10_IndPerfOverview.rpt
+    /// and SampleReport.rpt): FontColor.Color defaults to 0 the moment a Text/Field object exists --
+    /// it is never the 0xFFFFFFFF "unset" sentinel that FillColor/BackgroundColor use -- so every
+    /// text-bearing object on this fixture must report a real (non-null) colour, "#000000" under
+    /// the COLORREF hypothesis.
+    /// </summary>
+    [Fact]
+    public void Read_ReturnsTextColorHexForEveryTextAndFieldObject()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var schema = ReportReader.Read(session);
+        var textish = schema.Sections.SelectMany(s => s.Objects).Where(o => o.Kind == "Text" || o.Kind == "Field").ToList();
+
+        textish.Should().NotBeEmpty();
+        textish.Should().OnlyContain(o => o.TextColorHex == "#000000");
+    }
+
+    [Fact]
+    public void Read_LeavesTextColorHexNullForNonTextObjects()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var schema = ReportReader.Read(session);
+        var nonTextish = schema.Sections.SelectMany(s => s.Objects).Where(o => o.Kind != "Text" && o.Kind != "Field" && o.Kind != "FieldHeading");
+
+        nonTextish.Should().OnlyContain(o => o.TextColorHex == null);
+    }
+
+    /// <summary>
+    /// Measured: every section on SampleReport.rpt has no background colour explicitly set in
+    /// the designer, and reads back Format.BackgroundColor == 0xFFFFFFFF -- the sentinel ColorRef
+    /// maps to null, not the misleading "#FFFFFF" (which would be indistinguishable from a real,
+    /// explicitly-set white background).
+    /// </summary>
+    [Fact]
+    public void Read_LeavesBackgroundColorHexNullWhenNeverExplicitlySet()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+
+        var schema = ReportReader.Read(session);
+
+        schema.Sections.Should().OnlyContain(s => s.BackgroundColorHex == null);
+    }
+
+    /// <summary>
+    /// Measured on PMSV10_IndPerfOverview.rpt: Box3 has no fill explicitly set in the designer
+    /// and reads back FillColor == 0xFFFFFFFF; several other boxes on the same fixture (e.g.
+    /// Box14, Box17, Box18) DO have an explicit fill and read back with their top byte 0x00
+    /// (e.g. 0x00E1E1E1), proving the sentinel and a real colour are actually distinguishable on
+    /// this fixture rather than every box coincidentally landing on the same value.
+    /// </summary>
+    [Fact]
+    public void Read_MapsTheUnsetFillColorSentinelToNullRatherThanABogusHexValue()
+    {
+        var path = System.IO.Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        using var session = CrystalSession.Open(path);
+
+        var schema = ReportReader.Read(session);
+        var boxes = schema.Sections.SelectMany(s => s.Objects).Where(o => o.Kind == "Box").ToList();
+
+        boxes.Should().NotBeEmpty();
+        boxes.Should().Contain(b => b.FillColorHex == null,
+            because: "at least one box on this fixture has no fill explicitly set");
+        boxes.Should().Contain(b => b.FillColorHex != null,
+            because: "at least one box on this fixture DOES have an explicit fill, proving the null case above is real, not universal");
+    }
+
     [Theory]
     [InlineData("Documents.rpt")]
     [InlineData("JournalEntry.rpt")]

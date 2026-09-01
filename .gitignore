@@ -3,9 +3,6 @@ bin/
 obj/
 dist/
 
-# SDD scratch workspace (git-ignored by design)
-.superpowers/
-
 # User-specific
 *.user
 *.suo
@@ -14,3 +11,20 @@ dist/
 # NuGet
 packages/
 *.nupkg
+
+# Test run artifacts (hang dumps are hundreds of MB)
+TestResults/
+
+# SDD scratch workspace (git-ignored by design; the per-task briefs are copied
+# into docs/briefs/ so the reasoning behind each feature travels with the repo)
+.superpowers/
+
+# Generated report artifacts. Most are regenerable via out/scripts/, but the base
+# reports were hand-made in the Crystal Designer and cannot be. Keep the .rpt
+# deliverables and the generators; drop the JSON plans and the dated backups.
+out/**
+!out/
+!out/reports/
+!out/reports/*.rpt
+!out/scripts/
+!out/scripts/*.ps1

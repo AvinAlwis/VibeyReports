@@ -47,6 +47,26 @@ public class LayoutPlanValidatorTests
         }
     };
 
+    /// <summary>
+    /// Schema() plus a sub-report ALREADY embedded in the report, shaped exactly as ReportReader
+    /// emits one (measured against out/reports/PMSV10_GoalAlignCascade.subreport.rpt): the placed
+    /// object's Name is Crystal's own auto-numbered "Subreport1", while the sub-report's own name
+    /// -- the only string setSubreportLink resolves by -- is the separate SubreportName.
+    /// Kept out of Schema() so the shared fixture's object counts stay as every other test found
+    /// them.
+    /// </summary>
+    private static ReportSchema SchemaWithEmbeddedSubreport()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "Subreport1", Kind = "Subreport", SubreportName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300,
+            SubreportLinks = new System.Collections.Generic.List<SubreportLinkInfo>()
+        });
+        return schema;
+    }
+
     private static LayoutPlan PlanOf(params LayoutOperation[] ops) =>
         new LayoutPlan { PlanVersion = 1, Operations = { } }.With(ops);
 
@@ -614,6 +634,1091 @@ public class LayoutPlanValidatorTests
 
         result.IsValid.Should().BeFalse();
         result.Errors[0].Message.Should().Contain("not a field in this report");
+    }
+
+    // --- addSubreport / setSubreportLink ---
+
+    [Fact]
+    public void Validate_AcceptsAddSubreportWithValidInput()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWithoutReportPath()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("reportPath");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseReportPathDoesNotEndInRpt()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.txt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain(".rpt");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseNewNameCollides()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "CustomerName",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("already exists");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWithOutOfBoundsGeometry()
+    {
+        // printable width = 12240 - 720 - 720 = 10800; right edge here = 9000 + 3000 = 12000.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 9000, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("printable width");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkAgainstASubreportAddedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+                SubreportField = "{sp_goal_detail;1.performance_cycle_id}",
+                LinkedParameter = "@performance_cycle_id"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkTargetingATextObject()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "Title",
+            MainReportField = "{sp_x;1.performance_cycle_id}",
+            SubreportField = "{sp_y;1.performance_cycle_id}",
+            LinkedParameter = "@performance_cycle_id"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("not a Subreport");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkMissingAnyLinkField()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "", SubreportField = "{sp_y;1.performance_cycle_id}", LinkedParameter = "@performance_cycle_id"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("mainReportField");
+    }
+
+    /// <summary>
+    /// A sub-report is not fontable. Targeted through the ALREADY-EMBEDDED sub-report's placed
+    /// object name, which is the only way this rule is reachable on its own: a sub-report added by
+    /// the same plan is now stopped one step earlier, by F1's gate (see the test below), so
+    /// pointing this at one would assert the wrong rule's message.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetFontSizeOnASubreport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetFontSize, Target = "Subreport1", FontSizePt = 10f
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("has no font to change");
+    }
+
+    /// <summary>
+    /// F1 again, for a font operation: setFontSize resolves through LayoutApplier.FindObject just
+    /// like move/resize do, so a same-plan sub-report must be stopped by the identity gate rather
+    /// than reach the applier. Both rules reject it; only this one explains why the name does not
+    /// resolve.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetFontSizeOnASubreportAddedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "GoalDetail", FontSizePt = 10f });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("added earlier in this same plan");
+    }
+
+    // --- review round 3: the SubreportName/Name identity split ---
+
+    /// <summary>
+    /// F1. Before the fix this plan validated CLEAN: the added sub-report was registered under
+    /// newName, so "move GoalDetail" resolved against the simulation happily. At apply time
+    /// operation 0 was written to the LIVE document, then operation 1 threw from
+    /// LayoutApplier.FindObject -- which matches on the report object's own Name, and Crystal had
+    /// named the placed object "Subreport1", not "GoalDetail". That faulted the session and lost
+    /// the whole plan, addSubreport included. It must be rejected before anything is written, and
+    /// the message must give the reason (Crystal names the object itself) rather than a bare
+    /// "does not exist", which would send the agent hunting for a typo it did not make.
+    /// </summary>
+    [Theory]
+    [InlineData(LayoutActions.Move)]
+    [InlineData(LayoutActions.Resize)]
+    [InlineData(LayoutActions.RemoveObject)]
+    [InlineData(LayoutActions.SetAlignment)]
+    public void Validate_RejectsNonLinkOperationsAgainstASubreportAddedEarlierInTheSamePlan(string action)
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = action, Target = "GoalDetail",
+                LeftTwips = 10, TopTwips = 10, WidthTwips = 100, HeightTwips = 100, Alignment = "Left"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("added earlier in this same plan")
+              .And.Contain("auto-numbered")
+              .And.Contain("Only setSubreportLink");
+    }
+
+    /// <summary>
+    /// F1's counterpart: the gate must not cost the normal usage anything. setSubreportLink is the
+    /// one action that CAN address a same-plan sub-report by newName, because SetSubreportLinks is
+    /// keyed by SubreportName rather than by the report object. Verified live against the real
+    /// worker (addSubreport + setSubreportLink in one plan, ok:true).
+    /// </summary>
+    [Fact]
+    public void Validate_StillAcceptsSetSubreportLinkAgainstASubreportAddedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+                SubreportField = "{sp_goal_detail;1.goal_id}"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F2, the finding that matters most: linking a sub-report that is ALREADY embedded -- put
+    /// there by an earlier apply_layout call, or present in the source .rpt from the start. Before
+    /// the fix this was impossible to express at all: read_report never reported SubreportName, so
+    /// the only sub-report name the agent could see was the placed object's ("Subreport1"), which
+    /// setSubreportLink cannot resolve. Verified end-to-end against the real worker and
+    /// out/reports/PMSV10_GoalAlignCascade.subreport.rpt: ok:true, and the link reads back.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkAgainstASubreportAlreadyEmbeddedInTheReport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F2. The single likeliest mistake now that both names are visible: passing the object "name"
+    /// where the "subreportName" belongs. Measured: that reaches SetSubreportLinks and fails with
+    /// COM "This value is write-only." -- true, loud, and useless. Catch it in the validator and
+    /// name the string that would have worked.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkTargetingTheSubreportsPlacedObjectNameAndNamesTheRightOne()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "Subreport1",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("placed object name")
+              .And.Contain("subreportName")
+              .And.Contain("\"GoalDetail\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkAgainstAnUnknownSubreportName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "NoSuchSubreport",
+            MainReportField = "{sp_x;1.a}", SubreportField = "{sp_y;1.a}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("No sub-report named \"NoSuchSubreport\"");
+    }
+
+    /// <summary>
+    /// F5. newName uniqueness was checked against the report OBJECT names only, so an addSubreport
+    /// named for a sub-report the report already embeds collided invisibly -- and setSubreportLink,
+    /// which resolves through that same name-space, would then have two candidates and no way to
+    /// say which was meant. Verified live: rejected with this message.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseNewNameCollidesWithAnAlreadyEmbeddedSubreportName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("already embedded");
+    }
+
+    /// <summary>
+    /// Removing a sub-report's placed container object takes the embedded sub-report with it, so a
+    /// later setSubreportLink against its SubreportName must stop resolving. (removeObject targets
+    /// the object name, which is legal here because this sub-report was embedded by an earlier
+    /// plan, not by this one.)
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkAgainstASubreportRemovedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Subreport1" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_x;1.a}", SubreportField = "{sp_y;1.a}"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("No sub-report named \"GoalDetail\"");
+    }
+
+    /// <summary>
+    /// F4. linkedParameter is optional because it has no effect: measured against the installed
+    /// 11.5 RAS, Crystal discards whatever LinkedParameterName is written and substitutes its own
+    /// "{?Pm-&lt;mainReportField&gt;}". Requiring a value only invited the agent to invent a stored
+    /// procedure parameter name and believe it had been wired up. Verified live: a plan omitting it
+    /// entirely applies ok:true and reads back the Pm- substitution.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkWithNoLinkedParameter()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+            MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+            SubreportField = "{sp_perf_goal_align_detail;1.goal_id}",
+            LinkedParameter = null
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// F7. The tool contract promises an absolute reportPath and nothing checked it, so a relative
+    /// path silently resolved against the WORKER process's working directory -- a path the agent
+    /// has no visibility of, making even the applier's "file not found" message name something the
+    /// agent never wrote. Path.IsPathRooted is pure string arithmetic, so this stays a validator
+    /// rule and the validator stays free of file I/O.
+    /// </summary>
+    [Theory]
+    [InlineData(@"reports\GoalDetail.rpt")]
+    [InlineData("GoalDetail.rpt")]
+    [InlineData("./GoalDetail.rpt")]
+    public void Validate_RejectsAddSubreportWithARelativeReportPath(string reportPath)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = reportPath,
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("must be an absolute path");
+    }
+
+    // --- removeObject ---
+
+    [Fact]
+    public void Validate_RejectsRemoveObjectWithNoTarget()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("target");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveObjectTargetingAnObjectThatDoesNotExist()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "NoSuchObject" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("NoSuchObject");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAValidRemoveObject()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAMoveTargetingAnObjectRemovedEarlierInThePlanAndSaysSo()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" },
+            new LayoutOperation { Action = LayoutActions.Move, Target = "Title", LeftTwips = 10, TopTwips = 10 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("Title");
+        result.Errors[0].Message.Should().Contain("removed earlier in this plan",
+            because: "the message must make clear Title was removed by this plan, not that it never existed");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTextReusingTheNameOfAnObjectRemovedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Title", Text = "New Title",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsResizeSectionShrinkAfterRemovingTheOnlyObjectThatWouldHaveBlockedIt()
+    {
+        // CustomerName ends at Top(20) + Height(300) = 320, so shrinking Section3 (currently 400)
+        // to anything below 320 would normally be rejected -- unless the object is gone first.
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "CustomerName" },
+            new LayoutOperation { Action = LayoutActions.ResizeSection, Section = "Section3", HeightTwips = 100 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    // The contents of LayoutActions.All are asserted exhaustively by
+    // LayoutPlanTests.LayoutActions_All_ContainsEverySupportedActionAndNothingElse, which compares
+    // against the complete set. A second, weaker copy used to live here, asserting a hardcoded
+    // count plus a hand-picked subset. It went red on every addition without ever catching
+    // anything the exhaustive test would have missed, so it was deleted rather than renumbered.
+
+    // --- colour operations ---
+
+    [Fact]
+    public void Validate_AcceptsSetTextColorOnAFontableObject()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "Title", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetTextColorOnAFieldHeadingObject()
+    {
+        // Reuses IsFontable, which already includes FieldHeading.
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "StageNameHeading", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTextColorOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "HeaderRule", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("HeaderRule");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetFillColorOnAText()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "Title", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("Box");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetLineColorOnAField()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "CustomerName", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("Line or Box");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetLineColorOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "HeaderRule", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSectionBackgroundOnAnExistingSection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = "Section1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSectionBackgroundOnAnUnknownSection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = "SectionZ", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("SectionZ");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("1F2A37")]
+    [InlineData("#1F2A3")]
+    [InlineData("#1F2A377")]
+    [InlineData("#GGGGGG")]
+    [InlineData("red")]
+    public void Validate_RejectsMalformedColorWithAMessageShowingTheExpectedForm(string? color)
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "Title", Color = color });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("#RRGGBB");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddBoxThenSetFillColorOnTheNewBoxInTheSamePlan()
+    {
+        // Kind checks must use the SIMULATED kind: a box added earlier in this same plan must be
+        // a valid target for setFillColor even though it doesn't exist in the original schema.
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddBox, Section = "Section1", NewName = "NewBox1",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 100
+            },
+            new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "NewBox1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddLineThenSetLineColorOnTheNewLineInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddLine, Section = "Section1", NewName = "NewLine1",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 0
+            },
+            new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "NewLine1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTextThenSetTextColorOnTheNewTextInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "NewText1", Text = "hi",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 50
+            },
+            new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "NewText1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    // ---- data-source table operations ------------------------------------
+    //
+    // Shaped after out/reports/PMSV10_GoalAlignCascade.rpt, which is bound to three stored
+    // procedures. "sp_perf_goal_align_detail;1" is the redundant one -- two unlinked procedures in
+    // one report is a cartesian join -- and five Field objects (DR0..DR4 in the real report, two
+    // here) are bound to it. Measured against the real SDK: Crystal's own RemoveTable removes such
+    // a table WITHOUT complaint, leaving those fields unresolvable, so this validator is the only
+    // thing standing between a model and a broken report.
+
+    private const string Cascade = "sp_perf_goal_align_cascade;1";
+    private const string Detail = "sp_perf_goal_align_detail;1";
+
+    private static ReportSchema TableSchema()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "DR0", Kind = "Field", LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200,
+            DataSource = "{" + Detail + ".goal_id}"
+        });
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "DR1", Kind = "Field", LeftTwips = 600, TopTwips = 0, WidthTwips = 500, HeightTwips = 200,
+            DataSource = "{" + Detail + ".goal_name}"
+        });
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "B1L0v", Kind = "Field", LeftTwips = 0, TopTwips = 600, WidthTwips = 500, HeightTwips = 100,
+            DataSource = "{" + Cascade + ".employee_name}"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "goal_id", FormulaForm = "{" + Detail + ".goal_id}",
+            TableAlias = Detail, ValueType = "Number", HeadingText = "Goal Id"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "employee_name", FormulaForm = "{" + Cascade + ".employee_name}",
+            TableAlias = Cascade, ValueType = "String", HeadingText = "Employee Name"
+        });
+        return schema;
+    }
+
+    [Fact]
+    public void Validate_AcceptsRemoveTableWhenNothingIsBoundToTheAlias()
+    {
+        var schema = TableSchema();
+        // "Command" is a real alias in the shared fixture with no object bound to it.
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableWhileABoundFieldSurvives_AndNamesTheObjects()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("DR0").And.Contain("DR1");
+    }
+
+    /// <summary>
+    /// The actual use case, and the reason the simulation has to be cumulative: strip the bound
+    /// fields, then drop the table they came from, in one plan.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsRemoveTableWhenThePlanRemovesTheBoundFieldsFirst()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// Removing only SOME of the bound fields must still be refused, or the "cumulative" handling
+    /// above would just be a blanket exemption for any plan that happens to contain a removeObject.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsRemoveTableWhenOnlySomeBoundFieldsAreRemovedFirst()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("DR1").And.NotContain("DR0");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableWithNoTarget()
+    {
+        foreach (var target in new string?[] { null, "", "   " })
+        {
+            var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = target });
+
+            var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+            result.IsValid.Should().BeFalse();
+            result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"target\"");
+        }
+    }
+
+    /// <summary>
+    /// ReportReader deliberately clears AvailableFields when field enumeration cannot reach the
+    /// database -- a normal, supported state. Absence cannot be proven from an empty list, so the
+    /// existence check is skipped rather than rejecting every table operation.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsTableOperationsWhenAvailableFieldsIsEmpty()
+    {
+        var schema = TableSchema();
+        schema.AvailableFields.Clear();
+
+        // removeTable LAST on purpose: once an alias has been removed by the plan, referring to it
+        // again is a plan error even with an unknown alias set, and that ordering rule is correct.
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddTable, Target = "who_knows;1", TableName = "sp_y;1", NewName = "sp_y;1"
+            },
+            new LayoutOperation { Action = LayoutActions.SetTableLocation, Target = "who_knows;1", TableName = "sp_x;1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "who_knows;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// Rule 1 still bites with an empty AvailableFields: the bound-object check reads the report's
+    /// own objects, not the field list, so a missing database connection must not turn the one
+    /// safety rule off.
+    /// </summary>
+    [Fact]
+    public void Validate_StillRejectsARemoveTableWithBoundObjectsWhenAvailableFieldsIsEmpty()
+    {
+        var schema = TableSchema();
+        schema.AvailableFields.Clear();
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("DR0");
+    }
+
+    /// <summary>
+    /// A sub-report carries its OWN data source and is never bound to a main report's tables, so
+    /// its DataSource is null. Without this pinned, embedding a sub-report could silently make its
+    /// host's tables unremovable.
+    /// </summary>
+    [Fact]
+    public void Validate_ASubreportDoesNotBlockRemoveTable()
+    {
+        var schema = TableSchema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "Subreport1", Kind = "Subreport", SubreportName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// A plain Contains would let alias "foo;1" match "{other_foo;1.x}" and refuse a legal
+    /// removal. The match is the prefix "{" + alias + "." specifically.
+    /// </summary>
+    [Fact]
+    public void Validate_AliasMatchingIsNotFooledByASubstringOfAnotherAlias()
+    {
+        var schema = Schema();
+        schema.Sections[1].Objects.Add(new ObjectInfo
+        {
+            Name = "OtherField", Kind = "Field", LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 100,
+            DataSource = "{other_foo;1.x}"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "x", FormulaForm = "{foo;1.x}", TableAlias = "foo;1", ValueType = "String"
+        });
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "x", FormulaForm = "{other_foo;1.x}", TableAlias = "other_foo;1", ValueType = "String"
+        });
+
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "foo;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>The formula form is case-insensitive in Crystal; the match must be too.</summary>
+    [Fact]
+    public void Validate_AliasMatchingIsCaseInsensitive()
+    {
+        var schema = TableSchema();
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.RemoveTable, Target = "SP_PERF_GOAL_ALIGN_DETAIL;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("DR0");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveTableForAnAliasThatIsNotInTheDataSource()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_nope;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTableThenRemoveTableOfTheSameAlias()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddTable, Target = Cascade,
+                TableName = "sp_perf_goal_align_history;1", NewName = "sp_perf_goal_align_history;1"
+            },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "sp_perf_goal_align_history;1" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAnAddFieldReferencingATableRemovedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = "Section3", NewName = "NewGoalId",
+                FieldRef = "{" + Detail + ".goal_id}",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle()
+            .Which.Message.Should().Contain("is not a field in this report's data source");
+    }
+
+    /// <summary>
+    /// A field added by an earlier addField binds to a table just as a pre-existing one does, so
+    /// the SimObject must carry its fieldRef as a DataSource or the removeTable check has a hole.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsRemoveTableWhenAFieldAddedEarlierInThePlanIsBoundToIt()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR0" },
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "DR1" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddField, Section = "Section3", NewName = "NewGoalId",
+                FieldRef = "{" + Detail + ".goal_id}",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 500, HeightTwips = 200
+            },
+            new LayoutOperation { Action = LayoutActions.RemoveTable, Target = Detail });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("NewGoalId");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableOnAnAliasCollision()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, TableName = "sp_x;1", NewName = Detail
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already in this report's data source");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWithoutTableName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, NewName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"tableName\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWithoutNewName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = Cascade, TableName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"newName\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddTableWhoseSourceAliasDoesNotExist()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddTable, Target = "sp_nope;1", TableName = "sp_new;1", NewName = "sp_new;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTableLocationOnAnUnknownTarget()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetTableLocation, Target = "sp_nope;1", TableName = "sp_x;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTableLocationWithoutTableName()
+    {
+        foreach (var name in new string?[] { null, "", "  " })
+        {
+            var plan = PlanOf(new LayoutOperation
+            {
+                Action = LayoutActions.SetTableLocation, Target = Detail, TableName = name
+            });
+
+            var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+            result.IsValid.Should().BeFalse();
+            result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"tableName\"");
+        }
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetTableLocationOnAKnownTable()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetTableLocation, Target = Detail, TableName = "sp_perf_goal_align_detail_v2;1"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// A table operation's target lives in the TABLE-ALIAS name-space, not the report-object one.
+    /// If removeTable were wired into the shared needsTarget block it would resolve the alias
+    /// against the object dictionary and reject every table operation with "Object ... does not
+    /// exist in the report."
+    /// </summary>
+    [Fact]
+    public void Validate_ResolvesATableTargetInTheTableNameSpaceNotTheObjectOne()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "Command" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// The converse: an OBJECT name must not accidentally resolve as a table alias.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsARemoveTableTargetingAReportObjectName()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveTable, Target = "CustomerName" });
+
+        var result = LayoutPlanValidator.Validate(plan, TableSchema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
     }
 }
 

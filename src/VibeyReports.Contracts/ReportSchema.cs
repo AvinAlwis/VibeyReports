@@ -31,12 +31,18 @@ public sealed class SectionInfo
     public string Kind { get; set; } = "";
     public int HeightTwips { get; set; }
     public bool Suppressed { get; set; }
+    /// <summary>"#RRGGBB", or null when the section has no background colour set.</summary>
+    public string? BackgroundColorHex { get; set; }
     public List<ObjectInfo> Objects { get; set; } = new List<ObjectInfo>();
 }
 
 public sealed class ObjectInfo
 {
-    /// <summary>RAS object name. Unique within the report. Used as the operation target.</summary>
+    /// <summary>
+    /// RAS object name. Unique within the report. The target for every operation EXCEPT
+    /// setSubreportLink, which is keyed by <see cref="SubreportName"/> instead -- see that
+    /// property for why the two are different strings for a Subreport object.
+    /// </summary>
     public string Name { get; set; } = "";
     /// <summary>Field, Text, Line, Box, Subreport, Picture, Chart, Crosstab, FieldHeading, Other.</summary>
     public string Kind { get; set; } = "";
@@ -57,6 +63,32 @@ public sealed class ObjectInfo
     public string? DataSource { get; set; }
     /// <summary>Literal text for Text objects.</summary>
     public string? Text { get; set; }
+
+    /// <summary>"#RRGGBB" text colour for Text/Field/FieldHeading objects; null for any other kind.</summary>
+    public string? TextColorHex { get; set; }
+    /// <summary>"#RRGGBB" fill colour for Box objects; null when not applicable, or when the box has no fill set.</summary>
+    public string? FillColorHex { get; set; }
+    /// <summary>"#RRGGBB" outline colour for Line/Box objects; null when not applicable.</summary>
+    public string? LineColorHex { get; set; }
+
+    /// <summary>
+    /// Populated only for Kind == "Subreport". Null otherwise. The embedded sub-report's OWN
+    /// name, which is a different string from <see cref="Name"/>: Crystal auto-numbers the placed
+    /// container object ("Subreport1", "Subreport2", ...) and stores the name the sub-report was
+    /// imported under here. setSubreportLink is keyed by THIS name, not by <see cref="Name"/>.
+    /// </summary>
+    public string? SubreportName { get; set; }
+
+    /// <summary>Populated only for Kind == "Subreport". Null otherwise.</summary>
+    public List<SubreportLinkInfo>? SubreportLinks { get; set; }
+}
+
+/// <summary>One main-report-to-subreport field link, as set by setSubreportLink.</summary>
+public sealed class SubreportLinkInfo
+{
+    public string MainReportFieldName { get; set; } = "";
+    public string SubreportFieldName { get; set; } = "";
+    public string LinkedParameterName { get; set; } = "";
 }
 
 public sealed class FieldInfo

@@ -64,12 +64,47 @@ public class LayoutPlanTests
     }
 
     [Fact]
-    public void LayoutActions_All_ContainsExactlyTheElevenMvpActions()
+    // Deliberately NOT named after the number of actions. The previous name hardcoded "Sixteen"
+    // and rotted silently when addSubreport/setSubreportLink took it to eighteen: the name stopped
+    // describing the test long before anyone noticed the test itself was red.
+    public void LayoutActions_All_ContainsEverySupportedActionAndNothingElse()
     {
         LayoutActions.All.Should().BeEquivalentTo(new[]
         {
             "move", "resize", "setFont", "setFontSize", "setBold",
-            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField"
+            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField", "removeObject",
+            "setTextColor", "setFillColor", "setLineColor", "setSectionBackground",
+            "addSubreport", "setSubreportLink",
+            "removeTable", "addTable", "setTableLocation"
         });
+        LayoutActions.All.Should().HaveCount(21);
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesTableName()
+    {
+        const string json = """
+        { "action": "addTable", "target": "sp_a;1", "tableName": "sp_b;1", "newName": "sp_b;1" }
+        """;
+
+        var op = JsonSerializer.Deserialize<LayoutOperation>(json, VibeyJson.Options)!;
+
+        op.Action.Should().Be(LayoutActions.AddTable);
+        op.Target.Should().Be("sp_a;1");
+        op.TableName.Should().Be("sp_b;1");
+        op.NewName.Should().Be("sp_b;1");
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesColor()
+    {
+        const string json = """
+        { "action": "setTextColor", "target": "CustomerName", "color": "#1F2A37" }
+        """;
+
+        var op = JsonSerializer.Deserialize<LayoutOperation>(json, VibeyJson.Options)!;
+
+        op.Action.Should().Be(LayoutActions.SetTextColor);
+        op.Color.Should().Be("#1F2A37");
     }
 }

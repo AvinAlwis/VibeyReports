@@ -902,3 +902,241 @@ does not tolerate the sharing. xUnit parallelises across collections by default.
 
 **Fix direction:** put the Crystal-touching collections in a single xUnit collection to serialise
 them, or give each test its own temp copy of the fixture.
+
+---
+
+## Licensing decision (2026-09-01, user)
+
+**FluentAssertions 8.9.0 is kept deliberately.** From v8 it is governed by the Xceed commercial
+licence: free for non-commercial use, paid subscription required for commercial use. The test run
+surfaces this as a warning on every suite.
+
+The user's call: this project is personal/non-commercial for now, so the community licence applies.
+**If Vibey Reports ever ships commercially, this must be revisited** — either downgrade to
+FluentAssertions 7.x (last Apache-2.0 release, near-identical API) or migrate to Shouldly / plain
+`Assert.*`.
+
+Note the same version is used by `D:\PHR-X-DB-MCP-SERVER` in both of its test projects, so any future
+change likely applies there too.
+
+---
+
+## Sub-report review round 3 (2026-09-01) — the SubreportName/Name identity split
+
+An independent review of `c21005e` found seven issues in `addSubreport`/`setSubreportLink`. All
+seven were fixed. The rulings below record the ones that were judgement calls, plus one prediction
+in the review that direct measurement contradicted.
+
+### The review's one wrong prediction: there was no silent-corruption path
+
+The review predicted that `setSubreportLink` against a **pre-existing** sub-report would be a
+"silent no-op reported as `ok:true`" — i.e. data loss. Measured directly against
+`out/reports/PMSV10_GoalAlignCascade.subreport.rpt` (which embeds a sub-report with object
+`Name = "Subreport1"` and `SubreportName = "GoalDetail"`), before any fix:
+
+- `target = "Subreport1"` passed the validator, then failed **loudly** in the applier with COM
+  `"This value is write-only."`, reported as `ok:false`.
+- `target = "GoalDetail"` was rejected by the validator: `Object "GoalDetail" does not exist in the
+  report.`
+
+So nothing was ever silently corrupted. The flaw was real but was a **usability/correctness** flaw:
+cross-plan linking was impossible to express, and both failure modes named the wrong cause. It has
+been fixed as such, and the fix makes cross-plan linking actually work rather than documenting the
+limitation away.
+
+### Ruling 1 — a Subreport is addressable by two different names, and both are now reported
+
+`ObjectInfo.Name` is the placed container object's name, which Crystal auto-numbers
+(`"Subreport1"`); `ObjectInfo.SubreportName` is the embedded report's own name, which is what
+`SubreportController.GetSubreportLinks`/`SetSubreportLinks` — and therefore `setSubreportLink` — are
+keyed by. `ReportReader` already read `SubreportName` and threw it away, leaving the agent able to
+see only the one name `setSubreportLink` does *not* accept.
+
+**Ruling:** report both. `SubreportName` is now on `ObjectInfo`, in `read_report`'s JSON, and in the
+tool description. `LayoutPlanValidator` keeps a second map (`SubreportName -> SimObject`) and
+resolves `setSubreportLink`'s target through it, so every other action stays on the object-name
+map. **Verified end-to-end** through the real worker against
+`PMSV10_GoalAlignCascade.subreport.rpt`: `read_report` reports
+`name="Subreport1", subreportName="GoalDetail"`; a plan whose only operation is a
+`setSubreportLink` on `"GoalDetail"` applies `ok:true`; the saved report reads back exactly one
+link. A second apply against *that* output appends a second link and keeps the first.
+
+`SubreportController.GetSubreportNames()` — present on the SDK surface but unused — is now the
+applier's guard: `setSubreportLink`'s target is resolved against it (which also canonicalises
+casing, since the validator matches case-insensitively and COM does not), so an unaddressable name
+produces a message naming the sub-reports that do exist instead of COM's "This value is write-only."
+
+### Ruling 2 — a sub-report added in the same plan can ONLY be targeted by `setSubreportLink`
+
+`[addSubreport newName="GoalDetail", move target="GoalDetail"]` used to validate clean, apply
+operation 0 to the **live** document, then throw at operation 1 from `LayoutApplier.FindObject`
+(which matches on the object's own `Name`, and Crystal had named the object `"Subreport1"`). That
+faulted the session and lost the entire plan, `addSubreport` included.
+
+Two fixes were open: kind-gate every non-`setSubreportLink` action against `"Subreport"`, or
+register the sim entry so only `setSubreportLink` resolves it.
+
+**Ruling: a third, narrower option** — register the added sub-report in **both** maps and flag it
+`AddedInPlan`, then reject any non-`setSubreportLink` target operation on it in the shared
+`needsTarget` block. This keeps `newName` uniqueness honest against later adds (which a
+register-in-one-map-only approach would lose) and, unlike a bare kind gate, does not forbid
+`move`/`resize`/`removeObject` on a sub-report that is *already* embedded — those are legitimate and
+work, because there the object name is real and known.
+
+The rejection message names the actual cause (Crystal assigns the placed object its own
+auto-numbered name at import time) and states that nothing is lost: `ImportSubreportEx` already
+receives the geometry at add time, and a second plan can address the object by the name
+`read_report` then reports. Verified live: the message is what the worker returns.
+
+### Ruling 3 — `linkedParameter` is now optional, because it has no effect
+
+`docs/sdk-notes.md` records (measured) that Crystal **discards** `LinkedParameterName` and
+substitutes its own `{?Pm-<mainReportField>}`. The tool description nevertheless told the agent that
+`setSubreportLink` "wires one of the sub-report's parameters to a main-report field".
+
+**Ruling:** requiring a value that provably has no effect only invites the agent to invent a stored
+procedure parameter name and believe it was wired up. `linkedParameter` is now optional in the
+validator, and the tool description states plainly that Crystal substitutes its own parameter, that
+`setSubreportLink` is a **field link only** and cannot target a stored procedure's declared
+parameter, and that `subreportField` must be a real sub-report **data** field — parameter forms
+(`{?x}`, `{?@x}`, bare `@x`) are all rejected by Crystal with "Invalid field name" (measured).
+Verified live: a plan omitting `linkedParameter` entirely applies `ok:true` and reads back the
+`{?Pm-...}` substitution.
+
+### Ruling 4 — the `COMException` tolerance must prove it discarded nothing
+
+`SetSubreportLinks` replaces the whole collection. The applier caught **any** `COMException` from
+`GetSubreportLinks` and started from a fresh collection, which would turn an append into a replace
+and report success. (It also called `links.Add` on a possibly-`null` result, where a
+`NullReferenceException` would escape the `COMException`-typed catch.)
+
+**Ruling:** keep the tolerance — a link-less sub-report genuinely may throw rather than return an
+empty collection — but make it carry a proof obligation. `null` is folded into the same "could not
+read" path, and whenever that path is taken the links are **re-read after the set and required to
+number exactly one**. More than one means real links were discarded; a read-back that itself fails
+means it cannot be shown they were not. Either way the operation throws, and the session's fault
+handling means the report is never saved. Nothing silently succeeds on unproven ground.
+
+### Ruling 5 — `reportPath` absoluteness belongs in the validator, not the applier
+
+The tool contract promised an absolute path and nothing checked it, so a relative path resolved
+against the **worker process's** working directory — which the agent cannot see, making even the
+applier's "file not found" message name a path the agent never wrote.
+
+**Ruling:** `Path.IsPathRooted` is pure string arithmetic with no file I/O, so it sits beside the
+`.rpt` suffix check in the validator without breaking the "validator does no file I/O" rule. The
+*existence* check stays in the applier, as before.
+
+---
+
+## Data-source operations: the database-controller boundary is lifted (2026-09-01, user)
+
+Every brief before this one carried the constraint *"Do not touch the database controller.
+Changing a report's data sources is outside this tool's remit."* **The user has explicitly lifted
+it**, on the reasoning that `removeTable`/`addTable`/`setTableLocation` never write to SQL Server —
+they only change the report's own binding metadata, and the database itself stays read-only
+throughout.
+
+**The boundary is now: report metadata may be WRITTEN; the database is only ever READ.**
+
+Still out of scope, and deliberately so: `ModifyTableConnectionInfo`,
+`SetTableLocationByServerDatabaseName`, `LogonEx`, `SetDataSource`, `ReplaceConnection` — anything
+that carries or changes a connection.
+
+### The credential rule (hard, permanent)
+
+**No layout operation may ever accept a username or password.** Plans are JSON files written to
+disk and quoted verbatim in documentation and bug reports; they must never become a place a
+credential is recorded. `ISCRConnectionInfo` exposes `UserName` and `Password`, and neither is read
+or written anywhere in `LayoutApplier`. `addTable` sidesteps the question entirely by CLONING the
+`ConnectionInfo` of a table already in the report, and `setTableLocation` leaves the table's own
+`ConnectionInfo` untouched.
+
+Measured while implementing this (`docs/sdk-notes.md`): the customer's reports **do** persist a
+connection user name (`sgdev01db01_devlogin`) but never a password. So the rule is not theoretical
+tidiness — a plan format with a `userName` field would have made a real credential routinely
+copy-pasteable.
+
+### Ruling — `removeTable`'s validator rule is the mechanism, not a nicety
+
+The brief expected Crystal might refuse to remove a table with objects still bound to it. Measured:
+it does not refuse, it **cascade-deletes the bound objects silently** (70 → 59 → 54 → 53 report
+objects across the three tables of `PMSV10_GoalAlignCascade.rpt`; the five `DR*` fields bound to
+`sp_perf_goal_align_detail;1` simply vanish). Nothing warns, and `RemovedObjects` cannot report them
+because no `removeObject` was ever issued.
+
+So `LayoutPlanValidator`'s refusal is the only thing standing between a model-authored plan and
+silent data destruction. Cost if wrong: a report loses objects nobody asked to remove, in a way the
+response does not disclose.
+
+### Ruling — the three table operations do NOT join the object `needsTarget` block
+
+The brief said all three "join `needsTarget`". Taken literally that resolves a table alias against
+the report-OBJECT dictionary and rejects every table operation with *"Object ... does not exist in
+the report."* — the exact trap the sub-report work hit with `setSubreportLink`. A report has three
+name-spaces: object names, `SubreportName`s, and table aliases. The three operations require a
+non-empty `target` (which is what the brief was after) but resolve it against the table-alias set.
+Cost if wrong: none; the requirement the brief stated is still enforced.
+
+### Ruling — no speculative `RemoveTableLink` pre-step
+
+The brief asked whether a table in a `TableLink` must have the link removed first. Measured both
+ways and the answer is no: a linked table removes cleanly and Crystal drops the link itself
+(`TableLinks` 1 → 0), while a refusal is *not* cured by removing the link (`Documents.rpt` refuses
+`Lines` before and after, and refuses the link-free `CompanyInfo` identically). A speculative
+link-removal step would destroy real links without ever unblocking anything, so there is none.
+Crystal's refusal is wrapped instead, with the real cause named (formula / record selection / group
+/ sort).
+
+### Ruling — `addTable` and `setTableLocation` ship, with the limitation stated loudly
+
+Measured: both **always contact the database server** and fail with
+`COMException: Logon failed. Unable to connect: incorrect log on parameters.` on every report here,
+because Crystal persists a connection's user name but not its password. This held across
+`ProcedureClass` vs `TableClass`, three `QualifiedName` shapes, parameters cloned and not, and a
+full `source.Clone(true)` — the call never gets far enough for the table's shape to matter.
+
+The brief anticipated this outcome and required it to be reported and documented rather than to
+block the work, so both operations ship with:
+- an applier error message that names the cause (cloned connection has no password; this tool never
+  accepts credentials) and points at `addSubreport` as the credential-free alternative;
+- the same statement in the `apply_layout` tool description, so the agent does not retry blindly.
+
+**Flagged to the user for a product decision:** on the customer's own reports these two operations
+cannot succeed, so they may not be worth their surface area. `removeTable` — the driving case — is
+unaffected and works fully offline.
+
+Consequence for tests: neither operation gets a live round-trip test. A success test would need a
+fixture whose saved connection logs on unattended (none exists), and a failure test would open a
+real network connection — which, with the VPN down, **blocks rather than fails** (post-merge finding
+PM1). Their offline guards are tested instead, and the live behaviour is recorded in
+`docs/sdk-notes.md`.
+
+### Three pre-existing red tests fixed in the same commit
+
+The user's Visual Studio run at `ca00e00` was 218 tests, 214 passed, 4 failed. Three were in files
+this task edits and were fixed here.
+
+1. `LayoutActions_All_ContainsExactlyTheSixteenActions` — never updated when `addSubreport`/
+   `setSubreportLink` took `All` to eighteen. Renamed to
+   `LayoutActions_All_ContainsEverySupportedActionAndNothingElse`: the old name hardcoded the count,
+   which is *why* it rotted silently — the name stopped describing the test long before anyone
+   noticed the test was red.
+2. `ReadReport_JsonIncludesSubreportLinksForASubreportObject` — failed with COM
+   *"Invalid value type."* It took `AvailableFields.First()`, which on `PMSV10_IndPerfOverview.rpt`
+   is `performance_cycle_id` (**Number**), and linked it to `{Command.CardCode}` (**String**).
+   Crystal type-checks link field pairs (measured, recorded at `ca00e00`). Now picks a String field
+   deliberately. Verified end-to-end through the real worker: `ok:true`, one link read back.
+3. `Apply_LinksASubreportThatWasAlreadyEmbeddedByAnEarlierPlan` — *"Sequence contains more than one
+   matching element"*. The test's premise was wrong, not just its LINQ:
+   `PMSV10_IndPerfOverview.rpt` **already embeds two sub-reports of its own** (`Subreport1` /
+   `"company logo"` in the page header, `Subreport2` / `"stage wise eval"` in the details band), so
+   after the test embeds a third, `Single(o => o.Kind == "Subreport")` matches three. Fixed by
+   selecting on `SubreportName == "VibeyGoalDetail"` — which is also the stronger assertion, since
+   it proves the sub-report is addressable by the `newName` the plan chose rather than assuming
+   there is only one to find. Verified against the real worker: the saved report reads back
+   `Subreport1/"company logo"`, `Subreport2/"stage wise eval"`, `Subreport3/"McpLinkedSubreport"`.
+
+The fourth failure (`ExportPdf_ProducesAValidPdfForEveryRenderableFixture("SampleReport.rpt")`,
+*"The process cannot access the file because it is being used by another process"*) was left alone
+as instructed — file contention with concurrent probing, matching post-merge finding PM3.

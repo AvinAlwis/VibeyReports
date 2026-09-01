@@ -253,3 +253,199 @@ bytes actually round-tripped correctly, so that assertion was added
   against the installed SDK before its task was dispatched.
 - `docs/superpowers/plans/2026-08-31-vibey-reports.md` — the original plan. Predates all of the
   above; this file wins wherever they disagree.
+
+## setSubreportLink cannot feed a stored-procedure parameter (measured 2026-09-01)
+
+`SubreportLink.LinkedParameterName` does **not** round-trip. Written as `"performance_cycle_id"`,
+Crystal discards it and stores its own auto-generated parameter instead:
+
+```
+main  = {sp_perf_goal_align_cascade;1.performance_cycle_id}
+sub   = {sp_perf_goal_align_detail;1.goal_id}
+param = {?Pm-sp_perf_goal_align_cascade;1.performance_cycle_id}
+```
+
+`setSubreportLink` therefore expresses only a Crystal **field link** — main field to an existing
+sub-report *data field*, filtered through a `{?Pm-...}` parameter Crystal creates itself. It cannot
+target a stored procedure's declared parameter.
+
+Also measured: `SubreportFieldName` must name a real sub-report data field. Parameter-style forms
+(`{?x}`, `{?@x}`, `{?Pm-x}`, bare `@x`) are all rejected with COM "Invalid field name."
+
+**Consequence for parameter-driven sub-reports:** the sub-report's result set must *return* the
+column being linked on. If the procedure takes the value only as a parameter and does not select it
+back, no field link can be built and the Designer's Insert Subreport wizard is the fallback.
+
+## A sub-report has two names, and only one of them links (measured 2026-09-01)
+
+`ImportSubreportEx(Name, ...)`'s `Name` argument does **not** become the placed report object's
+`Name`. Crystal auto-numbers the container object itself (`"Subreport1"`, `"Subreport2"`, ...) and
+stores the supplied string as `ISCRSubreportObject.SubreportName`. The two are different strings for
+the same sub-report, and they belong to different name-spaces:
+
+| Name | Read from | Used by |
+|---|---|---|
+| `ro.Name` (`"Subreport1"`) | `GetAllReportObjects()` | `ReportObjectController.Modify/Remove` — so `move`, `resize`, `setAlignment`, `removeObject` |
+| `SubreportName` (`"GoalDetail"`) | `ISCRSubreportObject.SubreportName` | `SubreportController.GetSubreportLinks/SetSubreportLinks/GetSubreport` — so `setSubreportLink` |
+
+Measured against `out/reports/PMSV10_GoalAlignCascade.subreport.rpt`:
+
+- `SetSubreportLinks("Subreport1", ...)` fails with COM **`"This value is write-only."`** — a real,
+  loud failure, not a silent no-op.
+- `SetSubreportLinks("GoalDetail", ...)` succeeds, and the link reads back through
+  `GetSubreportLinks("GoalDetail")` after save/reopen.
+- **Cross-plan linking works.** A sub-report embedded by an earlier save can be linked later, given
+  its `SubreportName`; a second, separate apply against an already-linked file appends and preserves
+  the first link. The earlier claim that only same-plan linking is supported was a consequence of
+  never reporting `SubreportName`, not an SDK limitation.
+- `GetSubreportLinks` returns the real collection whenever links exist, so the append path is not
+  relying on the fallback in practice.
+
+`SubreportController.GetSubreportNames()` is the authority on which names `SetSubreportLinks` will
+accept, and is worth resolving against before the call: it turns an unaddressable name into a
+message that lists what does exist, and canonicalises casing (COM is case-sensitive here; the
+validator is not).
+
+## Sub-report link field pairs are type-checked by Crystal (measured 2026-09-01)
+
+Linking a String main-report field to a Number sub-report field is refused at save time with COM
+"Invalid value type." Measured: `{...cascade;1.employee_name}` (String) to
+`{...detail;1.goal_id}` (Number) fails; `employee_name` to `goal_name` (String to String) succeeds.
+
+Note what this does NOT protect against: the check is on value *type*, not meaning. Linking
+`performance_cycle_id` to `goal_id` passes cleanly because both are Number, while being semantically
+nonsense. Type compatibility is not evidence that a link is correct.
+
+---
+
+## The data-source table operations (measured 2026-09-01)
+
+Everything below was measured against the installed 11.5 assemblies via a purpose-built 32-bit
+probe (`ISCDReportClientDocument` reached the usual way, through
+`ReportDocument.Load(...).ReportClientDocument`), against `out/reports/PMSV10_GoalAlignCascade.rpt`
+and the four fixtures in `tests/fixtures/`. Three of the four expectations the brief set out were
+contradicted by measurement.
+
+### The shape of a table in these reports
+
+`out/reports/PMSV10_GoalAlignCascade.rpt` is bound to **three** stored procedures, not two:
+`sp_perf_goal_align_cascade;1` (12 fields, 5 parameters), `sp_perf_goal_align_detail;1` (5 fields,
+2 parameters) and `sp_perf_company_logo;1` (1 field, 0 parameters).
+
+| Property | Value |
+|---|---|
+| `ClassName` | `CrystalReports.Procedure` (every table in every PeoplesHR fixture) |
+| `Name` | `sp_perf_goal_align_cascade;1` — the `;1` overload suffix is part of the name |
+| `Alias` | identical to `Name` |
+| `QualifiedName` | `hrmmain_philippinesdev.PeoplesHR.sp_perf_goal_align_cascade;1` — catalog.schema.name, **ending with `Name` verbatim, `;1` included** |
+| `Parameters` | populated from the report's own saved metadata, no database needed |
+| `ConnectionInfo.UserName` | **populated** (`sgdev01db01_devlogin`) |
+| `ConnectionInfo.Password` | **null** — Crystal does not persist passwords |
+
+`ConnectionInfo.Attributes` is a `PropertyBag` carrying `Database DLL`, `QE_DatabaseName`,
+`QE_DatabaseType`, `QE_ServerDescription`, `QE_SQLDB`, `SSO Enabled` and a nested
+`QE_LogonProperties` bag (provider, data source, catalog, timeouts). No password anywhere.
+
+That a report *does* persist a user name is the reason `LayoutOperation` deliberately has no field
+that could carry one: a plan must never become a place where a credential is written down, and
+nothing in the applier reads `UserName`/`Password` either.
+
+### `RemoveTable` does not protect bound fields — it silently deletes them
+
+The expectation was that Crystal might refuse to remove a table while report objects are still
+bound to it. It is worse than that: it removes the table **and the bound objects with it**, without
+reporting anything.
+
+Measured on `PMSV10_GoalAlignCascade.rpt`, removing all three tables in turn:
+
+```
+RemoveTable sp_perf_goal_align_cascade;1  -> ok, objects 70 -> 59
+RemoveTable sp_perf_goal_align_detail;1   -> ok, objects 59 -> 54   (DR0..DR4, the five bound fields)
+RemoveTable sp_perf_company_logo;1        -> ok, objects 54 -> 53
+```
+
+Confirmed by reopening the saved file: `DR0`–`DR4` are simply gone. Nothing asks, nothing warns,
+and `ApplyResult.RemovedObjects` would not list them because no `removeObject` was ever issued.
+
+**`LayoutPlanValidator` is therefore the only protection**, and its rule — refuse `removeTable`
+while any surviving object's `DataSource` starts with `"{" + alias + "."` — is not belt-and-braces.
+It is the mechanism.
+
+Removing the last remaining table is also allowed (`SampleReport.rpt` goes to zero tables), so
+there is no "a report must keep one table" backstop either.
+
+### Table links are irrelevant to `RemoveTable`
+
+The brief's hypothesis was that a table participating in a `TableLink` might be refused until the
+link is removed. Measured both directions; it is false.
+
+- **Linked tables remove cleanly, and Crystal drops the link itself.** On
+  `PMSV10_GoalAlignCascade.rpt`: `AddTableLink(cascade -> detail)`, then
+  `RemoveTable("sp_perf_goal_align_detail;1")` → succeeded, and `Database.TableLinks` went `1 -> 0`
+  without being touched.
+- **Removing the link first does not rescue a refusal.** On `tests/fixtures/Documents.rpt`,
+  `RemoveTable("Lines")` throws `COMException: Unable to remove table 'Lines'.` Removing its one
+  `TableLink` first and retrying throws the *same* error. And `"CompanyInfo"` in the same report,
+  which participates in **no** link at all, is refused identically.
+
+So a speculative `RemoveTableLink` pre-step would destroy real links without ever unblocking a
+removal. `LayoutApplier` deliberately has none.
+
+### When Crystal *does* refuse a removal
+
+The refusal is about other in-report references, not links. `PMSV10_IndPerfOverview.rpt` gives the
+full message:
+
+> Unable to remove table 'sp_perf_ind_perf_overview;1'. **There are still fields in the report from
+> this table. Please clear them before removing the table.**
+
+— and it says that even after every `Field` *object* bound to the table has been removed, so what
+remains is a formula, a record-selection formula, a group or a sort. All of those are outside what
+this tool edits, so the applier wraps the `COMException` with that explanation and points at the
+Crystal Designer. `Documents.rpt` refuses for the same reason (its fields are all bound through
+`{@...}` formulas).
+
+### `AddTable` and `SetTableLocation` require a live database logon
+
+This is the finding that most constrains the feature, and it was measured, not inferred.
+
+`ISCRDatabaseController.AddTable` **always contacts the database server**. Against
+`PMSV10_GoalAlignCascade.rpt` it throws:
+
+> `COMException: Logon failed. Unable to connect: incorrect log on parameters.`
+
+because the cloned `ConnectionInfo` carries the server, database and user name but no password.
+The failure is identical across every variation that could plausibly matter:
+
+| Variation tried | Result |
+|---|---|
+| `ProcedureClass` | Logon failed |
+| `TableClass` | Logon failed |
+| `QualifiedName` = `catalog.schema.newName` | Logon failed |
+| `QualifiedName` = bare `newName` | Logon failed |
+| `QualifiedName` = the source table's verbatim | Logon failed |
+| `Parameters` cloned from the source procedure | Logon failed |
+| `Parameters` left empty | Logon failed |
+| full `source.Clone(true)`, carrying the source's `DataFields` | Logon failed |
+
+The call never gets far enough for the table's shape to matter, so **the brief's questions about
+`ProcedureClass` vs `TableClass` and the required `QualifiedName` form cannot be answered by
+measurement on these reports** — they are decided by the logon, not by the metadata. The
+implementation mirrors the source table's own shape (`ProcedureClass` when the source is an
+`ISCRProcedure`; qualified name = the source's prefix with the new object name substituted, keeping
+the `;1`) because that is what the report itself looks like, and records the choice as unmeasured.
+
+`ISCRDatabaseController.SetTableLocation` fails the same way, for the same reason.
+
+**Consequence:** `addTable` and `setTableLocation` only work where the report's saved connection can
+log on unattended (integrated security, or a connection with no password). On the customer's
+reports they cannot. `addSubreport` is the credential-free way to bring a second data source into a
+report, and the `apply_layout` tool description says so. `removeTable`, by contrast, needs no
+database connection at all.
+
+### Nothing here needs the database except `AddTable`/`SetTableLocation`
+
+`RemoveTable`, `Database.Tables`, `Database.TableLinks`, `AddTableLink`, `RemoveTableLink` and
+`ISCRProcedure.Parameters` all read and write the report's own metadata and were exercised with the
+saved connection unusable. Only the two operations that must *verify a database object exists* go to
+the server.
