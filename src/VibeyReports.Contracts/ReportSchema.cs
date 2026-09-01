@@ -116,6 +116,16 @@ public sealed class NumberFormatInfo
     public int DecimalPlaces { get; set; }
     public bool ThousandsSeparator { get; set; }
     public bool SuppressIfZero { get; set; }
+
+    /// <summary>
+    /// True while Crystal is formatting this field from the system/locale defaults, in which case
+    /// <see cref="DecimalPlaces"/> and <see cref="ThousandsSeparator"/> are stored values that do
+    /// NOT describe what renders. Measured: with this on, Crystal discards writes to those two
+    /// properties entirely. setNumberFormat therefore turns it off, and it is reported here
+    /// because every property an operation writes must be readable back -- otherwise a report
+    /// showing "decimalPlaces: 2" would be telling the reader something untrue.
+    /// </summary>
+    public bool SystemDefault { get; set; }
 }
 
 /// <summary>One main-report-to-subreport field link, as set by setSubreportLink.</summary>

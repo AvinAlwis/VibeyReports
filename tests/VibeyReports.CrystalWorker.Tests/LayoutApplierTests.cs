@@ -1671,4 +1671,299 @@ public class LayoutApplierTests
         apply.Should().Throw<InvalidOperationException>()
              .WithMessage("*setTableLocation*sp_not_here;1*Aliases present*Command*");
     }
+
+    // ---- formatting operations ---------------------------------------------------------------
+    //
+    // Measured geometry of SampleReport.rpt these tests rely on: PageFooterSection1 is 663 twips
+    // tall and holds only PageNumber1 at top 442, so twips 0-441 of that section are free for a
+    // new object. PageNumber1 itself is a special field of type crFieldValueTypeInt32uField --
+    // the only NUMERIC field object on the fixture, which is why the number-format test targets
+    // it (see that test for why a String field would not do).
+
+    private static ObjectInfo FindObject(ReportSchema schema, string name) =>
+        schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == name);
+
+    private static SectionInfo FindSection(ReportSchema schema, string name) =>
+        schema.Sections.Single(s => s.Name == name);
+
+    [Fact]
+    public void Apply_SetsAPageBreakAndItSurvivesSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSectionBreak, Section = "DetailSection1", NewPageAfter = true
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSectionBreak, Section = "ReportFooterSection1", NewPageBefore = true
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var detail = FindSection(schema, "DetailSection1");
+            detail.NewPageAfter.Should().BeTrue();
+            // The property NOT asked for must be left alone, or "set one flag" would quietly
+            // clobber the other.
+            detail.NewPageBefore.Should().BeFalse();
+
+            var footer = FindSection(schema, "ReportFooterSection1");
+            footer.NewPageBefore.Should().BeTrue();
+            footer.NewPageAfter.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Every supported specialType, placed and read back. This is the operation the brief singled
+    /// out as most likely to hit the trap AddField hit ("The field value type is not valid"),
+    /// because a freshly constructed FieldObjectClass does not infer its value type. It does not:
+    /// SpecialFieldClass supplies FormulaForm AND Type from SpecialType alone, and Add accepts the
+    /// result for all seven.
+    /// </summary>
+    [Theory]
+    [InlineData("pageNumber", "PageNumber")]
+    [InlineData("pageNOfM", "PageNofM")]
+    [InlineData("totalPageCount", "TotalPageCount")]
+    [InlineData("printDate", "PrintDate")]
+    [InlineData("printTime", "PrintTime")]
+    [InlineData("reportTitle", "ReportTitle")]
+    [InlineData("recordNumber", "RecordNumber")]
+    public void Apply_AddsASpecialFieldOfEveryTypeAndItSurvivesSaveAndReopen(
+        string specialType, string expectedDataSource)
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSpecialField, Section = "PageFooterSection1",
+                    NewName = "SpecialUnderTest", SpecialType = specialType,
+                    LeftTwips = 120, TopTwips = 60, WidthTwips = 1400, HeightTwips = 221
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var placed = FindObject(schema, "SpecialUnderTest");
+            placed.Kind.Should().Be("Field");
+            placed.LeftTwips.Should().Be(120);
+            placed.TopTwips.Should().Be(60);
+            placed.WidthTwips.Should().Be(1400);
+            placed.HeightTwips.Should().Be(221);
+            // The binding itself, not just that an object exists. A special field's DataSource is
+            // the bare UNBRACED form ("PageNumber"), unlike a database field's "{Table.Field}" --
+            // measured against SampleReport's own PrintDate1/PageNumber1. Asserting it is what
+            // distinguishes "placed the right special field" from "placed some field".
+            placed.DataSource.Should().Be(expectedDataSource);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// A special field is a Field object, so the font operations must reach it. If its simulated
+    /// kind regressed, a page-number footer could be placed but never sized or emboldened.
+    /// </summary>
+    [Fact]
+    public void Apply_SpecialFieldIsFontableInTheSamePlanThatAddsIt()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSpecialField, Section = "PageFooterSection1",
+                    NewName = "Pager", SpecialType = "pageNOfM",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 1400, HeightTwips = 221
+                },
+                new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "Pager", FontSizePt = 9f },
+                new LayoutOperation { Action = LayoutActions.SetBold, Target = "Pager", Bold = true }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var pager = FindObject(schema, "Pager");
+            pager.FontSizePt.Should().Be(9f);
+            pager.Bold.Should().BeTrue();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The regression test for the finding that cost this operation two rounds: while
+    /// ISCRCommonFieldFormat.EnableSystemDefault is true, Crystal formats the field from the
+    /// locale defaults and DISCARDS NDecimalPlaces/ThousandsSeparator on save -- silently, with no
+    /// exception and an ok result. Deleting the EnableSystemDefault=false line from
+    /// SetNumberFormat makes the decimalPlaces and thousandsSeparator assertions below fail.
+    ///
+    /// The target is PageNumber1 deliberately. It is the fixture's only numeric field object
+    /// (crFieldValueTypeInt32uField); measured on the String fields CardCode1/CardName1, Crystal
+    /// keeps the EnableSystemDefault write but still discards the numeric properties, so a test
+    /// written against one of those would assert nothing about the format at all.
+    ///
+    /// All three requested values differ from the fixture's baseline (dp=0, thousands=true,
+    /// suppressIfZero=false), so none of them can pass by accident.
+    /// </summary>
+    [Fact]
+    public void Apply_SetsANumberFormatAndAllThreePropertiesSurviveSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetNumberFormat, Target = "PageNumber1",
+                    DecimalPlaces = 3, ThousandsSeparator = false, SuppressIfZero = true
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var format = FindObject(schema, "PageNumber1").NumberFormat;
+            format.Should().NotBeNull();
+            format.DecimalPlaces.Should().Be(3);
+            format.ThousandsSeparator.Should().BeFalse();
+            format.SuppressIfZero.Should().BeTrue();
+            // The gate itself, which the operation must turn off for the three above to mean
+            // anything -- and which is reported so the caller is not told a decimalPlaces value
+            // that does not describe what renders.
+            format.SystemDefault.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// A number format is the goal_id fix: "10,311.00" becomes "10311". Distinct from the test
+    /// above because it pins the exact combination the brief calls out, and because writing only
+    /// two of the three properties must leave the third alone.
+    /// </summary>
+    [Fact]
+    public void Apply_SetNumberFormatLeavesPropertiesTheCallerDidNotSupplyAlone()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetNumberFormat, Target = "PageNumber1",
+                    DecimalPlaces = 0, ThousandsSeparator = false
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var format = FindObject(schema, "PageNumber1").NumberFormat;
+            format.DecimalPlaces.Should().Be(0);
+            format.ThousandsSeparator.Should().BeFalse();
+            // Never supplied, and the fixture's value is false: it must not have been written.
+            format.SuppressIfZero.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsCanGrowAndObjectSuppressAndBothSurviveSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.SetCanGrow, Target = "CardName1", CanGrow = true },
+                new LayoutOperation { Action = LayoutActions.SetSuppress, Target = "CardCode1", Suppress = true }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var grown = FindObject(schema, "CardName1");
+            grown.CanGrow.Should().BeTrue();
+            // canGrow and suppressed are separate properties on the same ObjectFormat; setting one
+            // must not set the other.
+            grown.Suppressed.Should().BeFalse();
+
+            var hidden = FindObject(schema, "CardCode1");
+            hidden.Suppressed.Should().BeTrue();
+            hidden.CanGrow.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// setSuppress's other host. EnableSuppress is one Crystal property on two different format
+    /// types, which is why this is one operation rather than two -- and why both paths need
+    /// covering.
+    /// </summary>
+    [Fact]
+    public void Apply_SuppressesASectionWithSuppressIfBlankAndBothSurviveSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSuppress, Section = "ReportHeaderSection1",
+                    Suppress = true, SuppressIfBlank = true
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var section = FindSection(schema, "ReportHeaderSection1");
+            section.Suppressed.Should().BeTrue();
+            section.SuppressIfBlank.Should().BeTrue();
+            // A different section is untouched, so this cannot pass by suppressing everything.
+            FindSection(schema, "DetailSection1").Suppressed.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// suppressIfBlank is optional on the section form: omitting it must leave the section's
+    /// existing value alone rather than defaulting it to false.
+    /// </summary>
+    [Fact]
+    public void Apply_SectionSuppressWithoutSuppressIfBlankLeavesItAlone()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSuppress, Section = "DetailSection1", Suppress = true
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var section = FindSection(schema, "DetailSection1");
+            section.Suppressed.Should().BeTrue();
+            section.SuppressIfBlank.Should().BeFalse();
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
 }

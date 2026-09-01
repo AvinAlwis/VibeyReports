@@ -55,6 +55,45 @@ public class ReportToolsTests
     }
 
     /// <summary>
+    /// The formatting operations' read-back half, at the MCP boundary. Every property the five
+    /// Tier 1 formatting operations write has to reach the agent through read_report's JSON, or
+    /// the operations are write-only and their round-trip tests could never fail -- the exact
+    /// mistake this project shipped twice before.
+    ///
+    /// Asserts on the raw JSON as well as the deserialised schema deliberately: the schema type
+    /// having a property proves nothing about what the tool actually emits over the wire, and the
+    /// property names below are what the agent has to write in a layout plan.
+    /// </summary>
+    [Fact]
+    public async Task ReadReport_JsonIncludesTheFormattingProperties()
+    {
+        var json = await Tools().ReadReport(Fixtures.SampleReport, CancellationToken.None);
+
+        foreach (var property in new[]
+                 {
+                     "newPageBefore", "newPageAfter", "suppressIfBlank", // sections
+                     "canGrow", "suppressed",                            // objects
+                     "numberFormat", "decimalPlaces", "thousandsSeparator", "suppressIfZero"
+                 })
+        {
+            json.Should().Contain(property);
+        }
+
+        var schema = JsonSerializer.Deserialize<ReportSchema>(json, VibeyJson.Options)!;
+        schema.Sections.Should().NotBeEmpty();
+
+        // numberFormat is populated for Field objects and null for every other kind -- a Text or
+        // FieldHeading object has no ISCRFieldFormat at all (measured). Pinning both halves stops
+        // the property degenerating into "always null", which would still satisfy a
+        // json.Should().Contain check via the null-valued property.
+        var objects = schema.Sections.SelectMany(s => s.Objects).ToList();
+        objects.Where(o => o.Kind == "Field").Should().NotBeEmpty()
+               .And.OnlyContain(o => o.NumberFormat != null);
+        objects.Where(o => o.Kind == "FieldHeading").Should().NotBeEmpty()
+               .And.OnlyContain(o => o.NumberFormat == null);
+    }
+
+    /// <summary>
     /// The subreport half of the task, at the MCP boundary: read_report's JSON must expose
     /// subreportLinks for a Subreport-kind object, using a real apply_layout round trip (addSubreport
     /// then setSubreportLink) rather than a hand-built schema, so a regression anywhere in the

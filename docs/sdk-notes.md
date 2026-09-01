@@ -532,3 +532,121 @@ typo but is actually a stale schema.
 
 A sub-report embedded in a host report has its own cached schema, so it must be verified
 separately, from inside the sub-report, not just from the host.
+
+---
+
+## The formatting operations (measured 2026-09-01)
+
+Everything below was measured against the installed 11.5 assemblies, first by reflection and then
+by save-reopen-read round trips against `tests/fixtures/SampleReport.rpt` (through a scratch output
+path; the fixture was hash-checked unchanged throughout). Two of the brief's expectations were
+contradicted by measurement.
+
+### `SpecialFieldClass` derives everything from `SpecialType` — no lookup table needed
+
+The brief flagged `addSpecialField` as the operation most likely to repeat note 5's trap, where a
+freshly constructed `FieldObjectClass` was rejected with `COMException: The field value type is not
+valid.` until `FieldValueType` was resolved by walking the database tables. **That walk is not
+needed here, and neither is a hardcoded table of formula strings.**
+
+A bare `new SpecialFieldClass { SpecialType = ... }` populates `FormulaForm`, `Name`, `Type` and
+`Length` on its own, with no report open, no COM server and no database contact:
+
+| specialType | FormulaForm | Type | Length |
+|---|---|---|---|
+| `crSpecialFieldTypePageNumber` | `PageNumber` | `crFieldValueTypeInt32uField` | 4 |
+| `crSpecialFieldTypePageNOfM` | `PageNofM` | `crFieldValueTypeStringField` | 512 |
+| `crSpecialFieldTypeTotalPageCount` | `TotalPageCount` | `crFieldValueTypeInt32uField` | 4 |
+| `crSpecialFieldTypePrintDate` | `PrintDate` | `crFieldValueTypeDateField` | 4 |
+| `crSpecialFieldTypePrintTime` | `PrintTime` | `crFieldValueTypeTimeField` | 4 |
+| `crSpecialFieldTypeReportTitle` | `ReportTitle` | `crFieldValueTypeStringField` | 512 |
+| `crSpecialFieldTypeRecordNumber` | `RecordNumber` | `crFieldValueTypeInt32uField` | 4 |
+
+Note `PageNofM` — lowercase `o`, unlike the enum member's `PageNOfM`.
+
+`AddSpecialField` therefore constructs a `SpecialFieldClass`, reads `FormulaForm` and `Type` off it,
+and builds an ordinary `FieldObjectClass` from those. All seven `Add` cleanly; **the "field value
+type is not valid" failure never occurred**, because the type is always supplied.
+
+**A special field's `DataSource` is a bare, UNBRACED string.** Confirmed against the fixture's own
+pre-existing objects rather than inferred: `PrintDate1.DataSource == "PrintDate"` and
+`PageNumber1.DataSource == "PageNumber"`, while a database field on the same report is braced
+(`CardCode1.DataSource == "{Command.CardCode}"`). Both are `crReportObjectKindField`, which is why
+`addSpecialField`'s simulated kind is `"Field"` and the font operations work on one.
+
+### `EnableSystemDefault` silently discards a number format — the finding that mattered
+
+`setNumberFormat` was implemented first exactly as the brief described (clone the `FieldFormat`,
+mutate the clone's `NumericFormat`, write it back) and **it was a silent no-op**: the apply returned
+`ok: true`, no exception was raised anywhere, and the reopened report read back the values it had
+before. Mutating the object clone's nested `NumericFormat` in place instead — the shape `WithFont`
+and `setAlignment` use — behaved identically. Neither approach was the problem.
+
+The cause is a gate one level sideways: **`ISCRCommonFieldFormat.EnableSystemDefault`**. While it is
+true, Crystal formats the field from the system/locale defaults and discards `NDecimalPlaces` and
+`ThousandsSeparator` on save. It is true on every field of every fixture here. Measured on
+`PageNumber1`, requesting `NDecimalPlaces = 3` and `ThousandsSeparator = false`:
+
+| Variant | Result after save + reopen |
+|---|---|
+| Mutate `NumericFormat` in place only | dp=0, thousands=true, sysDefault=true — **nothing persisted** |
+| Clone `FieldFormat`, mutate, assign back to `FieldObject.FieldFormat` | **nothing persisted** |
+| `CommonFormat.EnableSystemDefault = false` + mutate in place | dp=3, thousands=false — **both persisted** |
+
+`EnableSuppressIfZero` is the exception that makes this dangerous: it persisted *even with the gate
+on*, so a test covering only that property would have passed against a two-thirds-broken operation.
+
+`SetNumberFormat` therefore always sets `EnableSystemDefault = false`. This is what the Crystal
+Designer does the moment an explicit number format is applied by hand, and the values it freezes are
+the ones the field was already displaying, so nothing changes visually beyond what was asked for.
+Because the operation writes that property, `read_report` reports it too, as
+`numberFormat.systemDefault` — reporting `decimalPlaces` without it would state a number that does
+not describe what renders.
+
+### `NDecimalPlaces` does not control precision on its own
+
+`RoundingFormat` rounds the value independently of how many decimals are displayed. Measured mapping
+across `CrRoundingTypeEnum`: `crRoundingTypeRoundToUnit` = 11 is 0 decimals,
+`crRoundingTypeRoundToTenth` = 10 is 1, `crRoundingTypeRoundToHundredth` = 9 is 2 — the enum value
+is `11 - decimalPlaces` over the 0-10 range the validator allows. Setting `NDecimalPlaces = 3` while
+leaving rounding at `RoundToUnit` persists both, and renders `10311.000`: three decimal places of a
+value already rounded to a whole number. `SetNumberFormat` keeps rounding in step with the requested
+precision, as the Designer does.
+
+### A number format does not apply to a non-numeric field
+
+Measured on the String fields `CardCode1`/`CardName1`: with the gate cleared, `EnableSystemDefault`
+itself persists, but `NDecimalPlaces` and `ThousandsSeparator` are still discarded. So
+`setNumberFormat` against a String field is harmless and does nothing visible.
+
+This is worth stating precisely because it is the reason **the validator must still not check that
+the target is numeric.** A field's value type is knowable only from `schema.AvailableFields`, which
+`ReportReader` deliberately clears whenever the data source cannot be enumerated — so a type check
+would reject every `setNumberFormat` whenever the database is unreachable, trading a harmless no-op
+for a hard failure in a normal, supported state. The operation is gated on object *kind* only.
+
+### The section and object format properties all round-trip unremarkably
+
+No surprises here, unlike the above. Written through the existing clone-mutate-commit idioms
+(`SetProperty(section, crReportSectionPropertyFormat, clone)` for sections, `Clone` + `Modify` for
+objects) and read straight back after save and reopen:
+
+- `ISCRSectionFormat.EnableNewPageBefore` / `EnableNewPageAfter` (`setSectionBreak`)
+- `ISCRSectionFormat.EnableSuppress` / `EnableSuppressIfBlank` (`setSuppress`, section form)
+- `ISCRObjectFormat.EnableCanGrow` (`setCanGrow`)
+- `ISCRObjectFormat.EnableSuppress` (`setSuppress`, object form)
+
+`EnableSuppress` genuinely is one property on two hosts — `ISCRSectionFormat` and `ISCRObjectFormat`
+each declare their own — which is why `setSuppress` is a single operation taking either, rather than
+a `setSuppress`/`setSectionSuppress` pair. `EnableSuppressIfBlank` exists **only** on the section
+form, with no counterpart on `ISCRObjectFormat`, so supplying it with an object target is rejected
+by the validator rather than silently ignored.
+
+`ISCRFieldFormat` is null on a Text or FieldHeading object and non-null on every Field object
+regardless of value type, so `ObjectInfo.NumberFormat` is populated for Field objects only.
+
+### Sections still cannot be added or removed
+
+Re-confirmed while scoping `setSectionBreak`: `ISCRReportDefController`'s only Add/Modify/Remove
+methods are for chart objects. A report's band structure is fixed as far as this SDK is concerned,
+so a page break is always set on a section that already exists.

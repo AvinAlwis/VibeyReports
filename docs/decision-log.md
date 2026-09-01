@@ -1233,3 +1233,92 @@ up to the server's authentication check and no further. Two things stay open unt
 credential tries it: that a correct password makes `AddTable`/`SetTableLocation` return at all, and
 that the password stays out of a `.rpt` that is actually saved (Crystal is measured never to persist
 one, so this is expected, but expectation is not measurement).
+
+---
+
+## Tier 1 formatting operations: setSectionBreak, addSpecialField, setNumberFormat, setCanGrow, setSuppress (2026-09-01)
+
+`LayoutActions.All` goes from twenty-one to twenty-six. All five are offline property writes; none
+contacts the database or reads `VIBEY_DB_PASSWORD`.
+
+Ruling: **`setSuppress` is ONE operation taking either an object or a section, not two operations.**
+The brief anticipated a reviewer preferring a `setSuppress`/`setSectionSuppress` split to match the
+`setFillColor`/`setSectionBackground` precedent. I upheld the single operation. That precedent is a
+pair because it writes two genuinely *different* properties (`ISCRBoxObject.FillColor` versus
+`ISCRSectionFormat.BackgroundColor`) which happen to look alike to a user. Suppress is the opposite
+case: `EnableSuppress` is one Crystal concept declared identically on `ISCRSectionFormat` and
+`ISCRObjectFormat`, and splitting it would make the agent choose between two action names for one
+idea. The exclusivity is enforced instead — the validator rejects both, neither, and
+`suppressIfBlank` alongside an object target, before either name-space lookup is attempted.
+Cost if wrong: an agent has to read one sentence of the tool description to know which field to
+supply; the validator's message names the mistake either way.
+
+Ruling: **the validator does NOT check that a `setNumberFormat` target is numeric**, only that it is
+kind `Field`. Value types come solely from `schema.AvailableFields`, which `ReportReader`
+deliberately clears when the data source cannot be enumerated — a normal, supported state with the
+VPN down. A type check would turn a working operation into a hard failure exactly when the database
+is unreachable, which is the trap `removeTable`'s existence check already sidesteps. Measurement
+made this cheaper than expected: a number format written to a String field is simply discarded by
+Crystal, so the cost of not checking is a harmless no-op rather than a corrupted report.
+Cost if wrong: a `setNumberFormat` against a String field reports success and changes nothing
+visible. Documented in the tool description and `docs/sdk-notes.md`.
+
+Ruling: **`NumberFormatInfo` gained a fourth property, `SystemDefault`, beyond the three the brief
+specified.** This is a deliberate departure, and it is required by the brief's own rule that every
+property these operations write must be readable back through `read_report`. Measurement (below)
+forced `setNumberFormat` to write `ISCRCommonFieldFormat.EnableSystemDefault`, which the brief could
+not have known about, so that property came under the same rule. It also prevents `read_report`
+stating something untrue: while the flag is on, the `decimalPlaces` and `thousandsSeparator` it
+reports are stored values that do NOT describe what renders.
+Cost if wrong: one extra field in the read schema.
+
+Ruling: **`setCanGrow` allows only `Text` and `Field`, per the brief, and this is the one rule I
+think the brief may have got wrong.** `FieldHeading` is excluded, yet a `FieldHeadingObjectClass`
+implements `ISCRTextObject`, holds real text, and carries the same `ISCRObjectFormat.EnableCanGrow`
+every report object has. This project has already made this exact mistake once in the other
+direction: final-review F3 widened `FontableKinds` to include `FieldHeading` after the original
+allowlist wrongly refused font changes on wizard-generated column headings with a message claiming
+they had no font. The driving case here — clipped free-text comment columns — is likely to involve
+exactly those wizard-generated headings. I followed the brief because it is the contract and because
+a narrow rule is visible, recoverable and trivially widened, whereas a wrong widening throws at COM
+mid-plan. Flagged for a reviewer to widen.
+Cost if wrong: `setCanGrow` on a column heading is refused and has to be done in the Designer.
+
+Ruling: `addSpecialField` shares the existing add-block in the validator rather than getting its own
+branch, so it inherits the newName-required, newName-unique and geometry-bounds checks unchanged,
+and `KindForAdd` registers it as `"Field"` so the font operations reach it. Its simulated
+`DataSource` is deliberately left null even though it adds a Field: a special field is computed by
+Crystal and belongs to no table, so it must never make a data-source table unremovable.
+Cost if wrong: none; strictly reuses proven checks.
+
+### Measured live, and what it changed
+
+Probed through the **published** worker (`publish.ps1` re-run first) against
+`tests/fixtures/SampleReport.rpt`, writing to a scratch path outside the repo. The fixture was
+hash-checked unchanged; `out/reports/` and `tests/fixtures/` were never written to. Full write-up in
+`docs/sdk-notes.md`.
+
+- **`addSpecialField` did NOT repeat `addField`'s "field value type is not valid" trap.** A bare
+  `SpecialFieldClass` derives `FormulaForm`, `Name`, `Type` and `Length` from `SpecialType` alone,
+  with no report open and no database contact, so the value type is always available to set. All
+  seven types placed, saved, reopened and read back correctly. A special field's `DataSource` is the
+  bare unbraced string (`"PageNumber"`), not the braced `"{Table.Field}"` form — confirmed against
+  the fixture's own pre-existing `PrintDate1`/`PageNumber1` rather than inferred.
+- **`setNumberFormat` as the brief described it was a SILENT NO-OP, and the first implementation
+  shipped it.** The brief's clone-the-FieldFormat-and-write-it-back shape returned `ok: true`,
+  raised nothing, and persisted nothing. So did mutating the clone's `NumericFormat` in place. The
+  actual gate is `ISCRCommonFieldFormat.EnableSystemDefault`: while it is true — and it is true on
+  every field of every fixture — Crystal formats from the locale defaults and discards
+  `NDecimalPlaces`/`ThousandsSeparator` on save. Clearing it makes both persist.
+  `EnableSuppressIfZero` persisted *even with the gate on*, which is precisely how a two-thirds
+  broken operation hides from a test that checks only one property.
+  This is the strongest possible argument for the brief's own "read it back" section: the operation
+  passed every check except reading back the same property it wrote.
+- **`NDecimalPlaces` alone does not control precision**; `RoundingFormat` rounds independently, and
+  the enum value is `11 - decimalPlaces` across the allowed 0-10 range. The applier keeps them in
+  step, as the Designer does.
+- **A number format does not apply to a non-numeric field.** With the gate cleared, a String field
+  keeps the `EnableSystemDefault` write but still discards the numeric properties.
+- The section and object format properties (`EnableNewPageBefore`/`EnableNewPageAfter`,
+  `EnableSuppress` on both hosts, `EnableSuppressIfBlank`, `EnableCanGrow`) round-trip through the
+  existing idioms with no surprises.

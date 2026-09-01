@@ -734,12 +734,35 @@ namespace VibeyReports.CrystalWorker
         /// Writes the three numeric display properties setNumberFormat exposes. This is the
         /// "goal_id renders as 10,311.00" fix: decimalPlaces 0 plus thousandsSeparator false.
         ///
-        /// ISCRFieldFormat.NumericFormat is a NESTED format object, so this is a clone-mutate-write
-        /// one level below the object clone ModifyObject already made: clone the FieldFormat,
-        /// mutate the clone's NumericFormat, then assign the clone back to
-        /// ISCRFieldObject.FieldFormat before ModifyObject's Modify(old, new) commits the whole
-        /// object. RAS objects are not mutated in place anywhere in this file and this is no
-        /// exception.
+        /// MEASURED, and writing this the obvious way produces a SILENT NO-OP. Two separate
+        /// findings, both established by save-reopen-read rather than by reasoning:
+        ///
+        /// 1. ISCRCommonFieldFormat.EnableSystemDefault is a GATE over the whole numeric format.
+        ///    While it is true -- and it is true on every field of every fixture here -- Crystal
+        ///    formats the field from the system/locale defaults and DISCARDS NDecimalPlaces and
+        ///    ThousandsSeparator on save. Setting them alone reported ok and changed nothing: the
+        ///    reopened report read back exactly the values it had before, with no exception
+        ///    anywhere. Turning EnableSystemDefault off is what makes the explicit format take
+        ///    effect, so this method always does, for any of the three properties. That is also
+        ///    what the Crystal Designer does the moment you set an explicit number format by hand,
+        ///    and it is why the values this freezes are the ones the field was already displaying
+        ///    -- nothing changes visually except what the caller asked to change.
+        ///    (EnableSuppressIfZero is the exception that proves the rule: it persisted even with
+        ///    the gate on, which is exactly how a half-working operation hides.)
+        ///
+        /// 2. NDecimalPlaces alone is not enough to control the displayed precision, because
+        ///    RoundingFormat rounds the value independently. Measured mapping: RoundToUnit (11) is
+        ///    0 decimals, RoundToTenth (10) is 1, RoundToHundredth (9) is 2 -- i.e. the enum value
+        ///    is 11 - decimalPlaces across the 0-10 range the validator allows. Setting
+        ///    NDecimalPlaces = 3 while leaving RoundingFormat at RoundToUnit persists both, but
+        ///    renders "10311.000" -- three decimal places of a value already rounded to a whole
+        ///    number. So rounding is kept in step with the requested precision, as the Designer
+        ///    keeps them in step.
+        ///
+        /// Everything is mutated in place on the clone ModifyObject already deep-copied, the same
+        /// shape WithFont uses for ISCRFont and setAlignment uses for ObjectFormat. Assigning a
+        /// separately cloned FieldFormat back onto the object clone was also tried, and Modify does
+        /// not carry it.
         ///
         /// Each of the three is written only when the caller supplied it, so a plan that sets just
         /// decimalPlaces cannot silently reset the field's existing thousands separator. The
@@ -756,18 +779,37 @@ namespace VibeyReports.CrystalWorker
                 throw new InvalidOperationException(
                     $"Field \"{obj.Name}\" has no field format object to set a number format on.");
 
-            var formatClone = field.FieldFormat.Clone(true);
-            var numeric = formatClone.NumericFormat;
+            var numeric = field.FieldFormat.NumericFormat;
             if (numeric == null)
                 throw new InvalidOperationException(
                     $"Field \"{obj.Name}\" has a field format but no numeric format object to write to.");
 
-            if (op.DecimalPlaces.HasValue) numeric.NDecimalPlaces = op.DecimalPlaces.Value;
+            // Finding 1: without this the other three writes are discarded on save.
+            if (field.FieldFormat.CommonFormat == null)
+                throw new InvalidOperationException(
+                    $"Field \"{obj.Name}\" has a field format but no common format object, so the " +
+                    "explicit number format could not be enabled and would silently not apply.");
+            field.FieldFormat.CommonFormat.EnableSystemDefault = false;
+
+            if (op.DecimalPlaces.HasValue)
+            {
+                numeric.NDecimalPlaces = op.DecimalPlaces.Value;
+                // Finding 2: keep rounding in step, or the extra digits are rendered as zeroes.
+                numeric.RoundingFormat = RoundingFor(op.DecimalPlaces.Value);
+            }
             if (op.ThousandsSeparator.HasValue) numeric.ThousandsSeparator = op.ThousandsSeparator.Value;
             if (op.SuppressIfZero.HasValue) numeric.EnableSuppressIfZero = op.SuppressIfZero.Value;
-
-            field.FieldFormat = formatClone;
         }
+
+        /// <summary>
+        /// CrRoundingTypeEnum, as a rounding step matching a decimal-place count. Measured against
+        /// the installed 11.5 enum: crRoundingTypeRoundToUnit = 11 (0 decimals),
+        /// crRoundingTypeRoundToTenth = 10 (1), crRoundingTypeRoundToHundredth = 9 (2), down to
+        /// crRoundingTypeRoundToTenBillionth = 1 (10). The validator caps decimalPlaces at 0-10,
+        /// which keeps this inside the enum's defined range.
+        /// </summary>
+        private static CrRoundingTypeEnum RoundingFor(int decimalPlaces) =>
+            (CrRoundingTypeEnum)(CrRoundingTypeEnum.crRoundingTypeRoundToUnit - decimalPlaces);
 
         /// <summary>
         /// Places a Crystal Special Field -- a page number, print date, "Page 1 of N" and so on.

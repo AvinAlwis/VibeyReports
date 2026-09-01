@@ -193,14 +193,19 @@ namespace VibeyReports.CrystalWorker
         {
             try
             {
-                var numeric = field.FieldFormat?.NumericFormat;
+                var fieldFormat = field.FieldFormat;
+                var numeric = fieldFormat?.NumericFormat;
                 if (numeric == null) return null;
 
                 return new Contracts.NumberFormatInfo
                 {
                     DecimalPlaces = numeric.NDecimalPlaces,
                     ThousandsSeparator = numeric.ThousandsSeparator,
-                    SuppressIfZero = numeric.EnableSuppressIfZero
+                    SuppressIfZero = numeric.EnableSuppressIfZero,
+                    // Measured: while this is true Crystal formats from the locale defaults and
+                    // discards writes to the two properties above, so reporting them without it
+                    // would be reporting values that are not what renders.
+                    SystemDefault = fieldFormat.CommonFormat != null && fieldFormat.CommonFormat.EnableSystemDefault
                 };
             }
             catch
