@@ -1720,6 +1720,456 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeFalse();
         result.Errors.Should().ContainSingle().Which.Message.Should().Contain("Known aliases");
     }
+
+    // ---- formatting operations -------------------------------------------------------------
+
+    private static string Why(ValidationResult r) => string.Join("; ", r.Errors.ConvertAll(e => e.Message));
+
+    [Fact]
+    public void Validate_AcceptsASectionBreak()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSectionBreak, Section = "Section3", NewPageAfter = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_RejectsASectionBreakWithNeitherBoolean()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBreak, Section = "Section3" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("newPageBefore");
+    }
+
+    [Fact]
+    public void Validate_RejectsASectionBreakWithoutASection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBreak, NewPageBefore = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"section\"");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAnAddSpecialField()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Pager",
+            SpecialType = SpecialFieldTypes.PageNOfM,
+            LeftTwips = 0, TopTwips = 0, WidthTwips = 1440, HeightTwips = 240
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Theory]
+    [InlineData("pageNumber")]
+    [InlineData("pageNOfM")]
+    [InlineData("totalPageCount")]
+    [InlineData("printDate")]
+    [InlineData("printTime")]
+    [InlineData("reportTitle")]
+    [InlineData("recordNumber")]
+    public void Validate_AcceptsEverySupportedSpecialType(string specialType)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Special",
+            SpecialType = specialType,
+            LeftTwips = 0, TopTwips = 0, WidthTwips = 1440, HeightTwips = 240
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    /// <summary>
+    /// The allowlist IS the contract. Accepting an unknown string and letting it fail at the COM
+    /// boundary would surface as a Crystal error naming an enum the caller never wrote -- including
+    /// for the raw enum member names, which callers must not have to know.
+    /// </summary>
+    [Theory]
+    [InlineData("crSpecialFieldTypePageNOfM")]
+    [InlineData("groupNumber")]
+    [InlineData("modificationDate")]
+    [InlineData("")]
+    public void Validate_RejectsAnUnknownSpecialType(string specialType)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Pager",
+            SpecialType = specialType,
+            LeftTwips = 0, TopTwips = 0, WidthTwips = 1440, HeightTwips = 240
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("specialType");
+    }
+
+    [Fact]
+    public void Validate_RejectsAnAddSpecialFieldWhoseNewNameAlreadyExists()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Title",
+            SpecialType = SpecialFieldTypes.PrintDate,
+            LeftTwips = 0, TopTwips = 0, WidthTwips = 1440, HeightTwips = 240
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already exists");
+    }
+
+    [Fact]
+    public void Validate_RejectsAnAddSpecialFieldPastThePrintableWidth()
+    {
+        // printable width = 12240 - 720 - 720 = 10800.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Pager",
+            SpecialType = SpecialFieldTypes.PageNumber,
+            LeftTwips = 10000, TopTwips = 0, WidthTwips = 2000, HeightTwips = 240
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("printable width");
+    }
+
+    /// <summary>
+    /// A special field IS a field object, so it must be fontable -- the whole point of registering
+    /// its simulated kind as "Field". If this regressed to "Other", a page-number footer could be
+    /// placed but never sized or emboldened.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetFontSizeAndSetBoldOnASpecialFieldAddedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSpecialField, Section = "Section1", NewName = "Pager",
+                SpecialType = SpecialFieldTypes.PageNOfM,
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 1440, HeightTwips = 240
+            },
+            new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "Pager", FontSizePt = 9f },
+            new LayoutOperation { Action = LayoutActions.SetBold, Target = "Pager", Bold = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_AcceptsANumberFormatOnAField()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = "CustomerName",
+            DecimalPlaces = 0, ThousandsSeparator = false
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_RejectsANumberFormatWithNoOptionalFieldSupplied()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = "CustomerName"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("at least one");
+    }
+
+    [Theory]
+    [InlineData("Title")]           // Text
+    [InlineData("HeaderRule")]      // Line
+    [InlineData("StageNameHeading")] // FieldHeading -- fontable, but has no ISCRFieldFormat
+    public void Validate_RejectsANumberFormatOnANonFieldObject(string target)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = target, DecimalPlaces = 0
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("not a Field");
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(11)]
+    public void Validate_RejectsAnOutOfRangeDecimalPlaces(int decimalPlaces)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = "CustomerName", DecimalPlaces = decimalPlaces
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("between 0 and 10");
+    }
+
+    /// <summary>
+    /// THE rule that keeps setNumberFormat usable off the VPN. A field's value type is knowable
+    /// only from schema.AvailableFields, and ReportReader deliberately CLEARS that list whenever
+    /// the data source cannot be enumerated -- a normal, supported state. A numeric-type check
+    /// would therefore reject every setNumberFormat whenever the database is unreachable, which is
+    /// exactly the trap removeTable's existence check already sidesteps.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsANumberFormatWhenAvailableFieldsIsEmpty()
+    {
+        var schema = Schema();
+        schema.AvailableFields.Clear();
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = "CustomerName", DecimalPlaces = 0
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    /// <summary>
+    /// The same rule stated from the other side: the target Field's own declared value type is
+    /// String here, and the operation must still be accepted. Only the object KIND is checked.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsANumberFormatOnAFieldWhoseDeclaredValueTypeIsNotNumeric()
+    {
+        var schema = Schema();
+        schema.AvailableFields.Clear();
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "Name", FormulaForm = "{Customer.Name}", TableAlias = "Customer",
+            ValueType = "String", HeadingText = "Name"
+        });
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetNumberFormat, Target = "CustomerName", DecimalPlaces = 0
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Theory]
+    [InlineData("Title")]         // Text
+    [InlineData("CustomerName")]  // Field
+    public void Validate_AcceptsSetCanGrowOnTextAndField(string target)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetCanGrow, Target = target, CanGrow = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetCanGrowOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetCanGrow, Target = "HeaderRule", CanGrow = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        // Names the offending kind, so this cannot be satisfied by the generic
+        // "requires canGrow" message the missing-flag branch produces.
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("is a Line");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetCanGrowOnABox()
+    {
+        var schema = Schema();
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "Frame", Kind = "Box", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetCanGrow, Target = "Frame", CanGrow = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("is a Box");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetCanGrowWithoutTheCanGrowFlag()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetCanGrow, Target = "Title" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"canGrow\"");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSuppressOnAnObject()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Target = "Title", Suppress = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    /// <summary>
+    /// setSuppress accepts ANY object kind, unlike setCanGrow: EnableSuppress is on
+    /// ISCRObjectFormat, which every report object carries, and hiding a line or a box is a
+    /// perfectly ordinary thing to want.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetSuppressOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Target = "HeaderRule", Suppress = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSuppressOnASectionWithSuppressIfBlank()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Section = "Section3", Suppress = false, SuppressIfBlank = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSuppressWithBothTargetAndSection()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Target = "Title", Section = "Section3", Suppress = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("not both");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSuppressWithNeitherTargetNorSection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSuppress, Suppress = true });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("exactly one");
+    }
+
+    [Fact]
+    public void Validate_RejectsSuppressIfBlankAlongsideAnObjectTarget()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Target = "Title", Suppress = true, SuppressIfBlank = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("suppressIfBlank");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSuppressWithoutTheSuppressFlag()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSuppress, Section = "Section3" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"suppress\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSuppressOnAnUnknownObject()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Target = "NoSuchObject", Suppress = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("does not exist");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSuppressOnAnUnknownSection()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSuppress, Section = "NoSuchSection", Suppress = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("does not exist");
+    }
 }
 
 internal static class PlanExtensions

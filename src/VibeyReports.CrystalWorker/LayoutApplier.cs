@@ -199,6 +199,42 @@ namespace VibeyReports.CrystalWorker
                             SetTableLocation(doc, op);
                             break;
 
+                        case LayoutActions.SetSectionBreak:
+                            ModifySectionFormat(doc, op.Section, LayoutActions.SetSectionBreak, f =>
+                            {
+                                if (op.NewPageBefore.HasValue) f.EnableNewPageBefore = op.NewPageBefore.Value;
+                                if (op.NewPageAfter.HasValue) f.EnableNewPageAfter = op.NewPageAfter.Value;
+                            });
+                            break;
+
+                        case LayoutActions.AddSpecialField:
+                            AddSpecialField(doc, op);
+                            break;
+
+                        case LayoutActions.SetNumberFormat:
+                            ModifyObject(doc, op.Target, o => SetNumberFormat(o, op));
+                            break;
+
+                        case LayoutActions.SetCanGrow:
+                            ModifyObject(doc, op.Target, o =>
+                                RequireObjectFormat(o, LayoutActions.SetCanGrow).EnableCanGrow = op.CanGrow.Value);
+                            break;
+
+                        case LayoutActions.SetSuppress:
+                            // One operation, two hosts: EnableSuppress lives on ISCRSectionFormat
+                            // AND ISCRObjectFormat. The validator has already guaranteed exactly
+                            // one of section/target is present, so this branch cannot be ambiguous.
+                            if (!string.IsNullOrWhiteSpace(op.Section))
+                                ModifySectionFormat(doc, op.Section, LayoutActions.SetSuppress, f =>
+                                {
+                                    f.EnableSuppress = op.Suppress.Value;
+                                    if (op.SuppressIfBlank.HasValue) f.EnableSuppressIfBlank = op.SuppressIfBlank.Value;
+                                });
+                            else
+                                ModifyObject(doc, op.Target, o =>
+                                    RequireObjectFormat(o, LayoutActions.SetSuppress).EnableSuppress = op.Suppress.Value);
+                            break;
+
                         default:
                             throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
                     }
@@ -640,13 +676,169 @@ namespace VibeyReports.CrystalWorker
             string sectionName,
             string colorHex)
         {
+            ModifySectionFormat(doc, sectionName, LayoutActions.SetSectionBackground,
+                f => f.BackgroundColor = ColorRef.FromHex(colorHex));
+        }
+
+        /// <summary>
+        /// The section-format equivalent of <see cref="ModifyObject"/>: clone the section's
+        /// ISCRSectionFormat, mutate the clone, and push it back through
+        /// SetProperty(crReportSectionPropertyFormat). Assigning to section.Format in place does
+        /// NOT persist -- the same reason report objects go through Clone/Modify. Every
+        /// section-level format operation (setSectionBackground, setSectionBreak and setSuppress's
+        /// section form) shares this one implementation so the idiom cannot drift between them.
+        /// </summary>
+        private static void ModifySectionFormat(
+            ISCDReportClientDocument doc,
+            string sectionName,
+            string action,
+            Action<ISCRSectionFormat> mutate)
+        {
             var section = FindSection(doc, sectionName);
+            if (section.Format == null)
+                throw new InvalidOperationException(
+                    $"Section \"{sectionName}\" has no format object, so \"{action}\" cannot be applied to it.");
+
             var clone = section.Format.Clone(true);
-            clone.BackgroundColor = ColorRef.FromHex(colorHex);
-            doc.ReportDefController.ReportSectionController.SetProperty(
-                section,
-                CrReportSectionPropertyEnum.crReportSectionPropertyFormat,
-                clone);
+            mutate(clone);
+
+            try
+            {
+                doc.ReportDefController.ReportSectionController.SetProperty(
+                    section,
+                    CrReportSectionPropertyEnum.crReportSectionPropertyFormat,
+                    clone);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"{action}\" for section \"{sectionName}\": {ex.Message.Trim()}", ex);
+            }
+        }
+
+        /// <summary>
+        /// ISCRObjectFormat carries EnableCanGrow and EnableSuppress. Every report object has one,
+        /// but the reader already treats a null Format as possible (it guards the alignment read
+        /// that way), so this guards rather than dereferencing blind -- an NRE mid-plan would
+        /// fault the session and lose the whole plan for no diagnosable reason.
+        /// </summary>
+        private static ISCRObjectFormat RequireObjectFormat(ISCRReportObject obj, string action)
+        {
+            if (obj.Format == null)
+                throw new InvalidOperationException(
+                    $"Object \"{obj.Name}\" ({obj.Kind}) has no format object, so \"{action}\" cannot be applied to it.");
+            return obj.Format;
+        }
+
+        /// <summary>
+        /// Writes the three numeric display properties setNumberFormat exposes. This is the
+        /// "goal_id renders as 10,311.00" fix: decimalPlaces 0 plus thousandsSeparator false.
+        ///
+        /// ISCRFieldFormat.NumericFormat is a NESTED format object, so this is a clone-mutate-write
+        /// one level below the object clone ModifyObject already made: clone the FieldFormat,
+        /// mutate the clone's NumericFormat, then assign the clone back to
+        /// ISCRFieldObject.FieldFormat before ModifyObject's Modify(old, new) commits the whole
+        /// object. RAS objects are not mutated in place anywhere in this file and this is no
+        /// exception.
+        ///
+        /// Each of the three is written only when the caller supplied it, so a plan that sets just
+        /// decimalPlaces cannot silently reset the field's existing thousands separator. The
+        /// validator guarantees at least one is present, so this can never be a no-op.
+        /// </summary>
+        private static void SetNumberFormat(ISCRReportObject obj, LayoutOperation op)
+        {
+            if (obj is not ISCRFieldObject field)
+                throw new InvalidOperationException(
+                    $"Object \"{obj.Name}\" ({obj.Kind}) is not a Field and has no number format; " +
+                    "the validator should have rejected it.");
+
+            if (field.FieldFormat == null)
+                throw new InvalidOperationException(
+                    $"Field \"{obj.Name}\" has no field format object to set a number format on.");
+
+            var formatClone = field.FieldFormat.Clone(true);
+            var numeric = formatClone.NumericFormat;
+            if (numeric == null)
+                throw new InvalidOperationException(
+                    $"Field \"{obj.Name}\" has a field format but no numeric format object to write to.");
+
+            if (op.DecimalPlaces.HasValue) numeric.NDecimalPlaces = op.DecimalPlaces.Value;
+            if (op.ThousandsSeparator.HasValue) numeric.ThousandsSeparator = op.ThousandsSeparator.Value;
+            if (op.SuppressIfZero.HasValue) numeric.EnableSuppressIfZero = op.SuppressIfZero.Value;
+
+            field.FieldFormat = formatClone;
+        }
+
+        /// <summary>
+        /// Places a Crystal Special Field -- a page number, print date, "Page 1 of N" and so on.
+        ///
+        /// MEASURED, and it is what makes this method as short as it is: a bare
+        /// <c>SpecialFieldClass</c> derives everything else from <c>SpecialType</c> on its own,
+        /// with no report open, no COM server and no database contact. Setting SpecialType to
+        /// crSpecialFieldTypePageNumber immediately yields FormulaForm "PageNumber", Name
+        /// "PageNumber", Type crFieldValueTypeInt32uField and Length 4. So there is no lookup table
+        /// to maintain and no chance of the value type disagreeing with the data source.
+        ///
+        /// That value type matters. AddField had to learn the hard way (sdk-notes.md note 5) that a
+        /// freshly constructed FieldObjectClass leaves FieldValueType at its CLR default and Add
+        /// rejects it outright with COMException "The field value type is not valid." A special
+        /// field is the same kind of object and would hit the same wall, which is why Type is taken
+        /// from the SpecialField rather than left unset or guessed.
+        ///
+        /// Confirmed against a real report rather than inferred: SampleReport.rpt's own PrintDate1
+        /// and PageNumber1 objects are ordinary crReportObjectKindField objects whose DataSource is
+        /// the bare, UNBRACED string "PrintDate" / "PageNumber" -- byte for byte what
+        /// SpecialFieldClass.FormulaForm returns. A database field's DataSource is braced
+        /// ("{Command.CardCode}"); a special field's is not.
+        ///
+        /// FontColor is supplied for the same reason AddField supplies it: a newly constructed
+        /// FieldObjectClass has none, and a setFontSize/setBold on the field this operation just
+        /// created would otherwise fail with "has no font object."
+        /// </summary>
+        private static void AddSpecialField(
+            ISCDReportClientDocument doc,
+            LayoutOperation op)
+        {
+            var section = FindSection(doc, op.Section);
+
+            var special = new SpecialFieldClass { SpecialType = ParseSpecialType(op.SpecialType) };
+
+            var field = new FieldObjectClass
+            {
+                Name = op.NewName,
+                DataSource = special.FormulaForm,
+                FieldValueType = special.Type,
+                Left = op.LeftTwips.Value,
+                Top = op.TopTwips.Value,
+                Width = op.WidthTwips.Value,
+                Height = op.HeightTwips.Value,
+                FontColor = DefaultFontColorFor(doc, op.Section)
+            };
+
+            AddReportObject(doc, section, field, LayoutActions.AddSpecialField, op.NewName);
+        }
+
+        /// <summary>
+        /// Maps the friendly specialType vocabulary onto CrSpecialFieldTypeEnum. The validator's
+        /// allowlist (SpecialFieldTypes.All) is the contract and is checked before anything reaches
+        /// here, so an unrecognised value at this point is a bug, not caller input -- reported the
+        /// same way ParseAlignment reports one.
+        /// </summary>
+        private static CrSpecialFieldTypeEnum ParseSpecialType(string specialType)
+        {
+            switch ((specialType ?? "").ToUpperInvariant())
+            {
+                case "PAGENUMBER": return CrSpecialFieldTypeEnum.crSpecialFieldTypePageNumber;
+                case "PAGENOFM": return CrSpecialFieldTypeEnum.crSpecialFieldTypePageNOfM;
+                case "TOTALPAGECOUNT": return CrSpecialFieldTypeEnum.crSpecialFieldTypeTotalPageCount;
+                case "PRINTDATE": return CrSpecialFieldTypeEnum.crSpecialFieldTypePrintDate;
+                case "PRINTTIME": return CrSpecialFieldTypeEnum.crSpecialFieldTypePrintTime;
+                case "REPORTTITLE": return CrSpecialFieldTypeEnum.crSpecialFieldTypeReportTitle;
+                case "RECORDNUMBER": return CrSpecialFieldTypeEnum.crSpecialFieldTypeRecordNumber;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported specialType \"{specialType}\"; the validator should have rejected it.");
+            }
         }
 
         /// <summary>

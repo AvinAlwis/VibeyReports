@@ -25,13 +25,44 @@ public static class LayoutActions
     public const string RemoveTable = "removeTable";
     public const string AddTable = "addTable";
     public const string SetTableLocation = "setTableLocation";
+    public const string SetSectionBreak = "setSectionBreak";
+    public const string AddSpecialField = "addSpecialField";
+    public const string SetNumberFormat = "setNumberFormat";
+    public const string SetCanGrow = "setCanGrow";
+    public const string SetSuppress = "setSuppress";
 
     public static readonly string[] All =
     {
         Move, Resize, SetFont, SetFontSize, SetBold,
         SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject,
         SetTextColor, SetFillColor, SetLineColor, SetSectionBackground, AddSubreport, SetSubreportLink,
-        RemoveTable, AddTable, SetTableLocation
+        RemoveTable, AddTable, SetTableLocation,
+        SetSectionBreak, AddSpecialField, SetNumberFormat, SetCanGrow, SetSuppress
+    };
+}
+
+/// <summary>
+/// The friendly <see cref="LayoutOperation.SpecialType"/> vocabulary accepted by
+/// <see cref="LayoutActions.AddSpecialField"/>, and the single place it is defined.
+///
+/// Deliberately a short allowlist rather than a pass-through of CrSpecialFieldTypeEnum's
+/// twenty-two members: a caller writes "pageNOfM", not "crSpecialFieldTypePageNOfM", and an
+/// unrecognised string must be rejected by the validator rather than reaching COM. Adding a
+/// member later is cheap; accepting an unknown one and failing at the COM boundary is not.
+/// </summary>
+public static class SpecialFieldTypes
+{
+    public const string PageNumber = "pageNumber";
+    public const string PageNOfM = "pageNOfM";
+    public const string TotalPageCount = "totalPageCount";
+    public const string PrintDate = "printDate";
+    public const string PrintTime = "printTime";
+    public const string ReportTitle = "reportTitle";
+    public const string RecordNumber = "recordNumber";
+
+    public static readonly string[] All =
+    {
+        PageNumber, PageNOfM, TotalPageCount, PrintDate, PrintTime, ReportTitle, RecordNumber
     };
 }
 
@@ -105,4 +136,46 @@ public sealed class LayoutOperation
     /// connection untouched. No layout operation accepts a credential of any kind.
     /// </summary>
     public string? TableName { get; set; }
+
+    /// <summary>
+    /// setSectionBreak: start a new page BEFORE this section prints. Optional, but at least one
+    /// of <see cref="NewPageBefore"/>/<see cref="NewPageAfter"/> must be supplied.
+    /// </summary>
+    public bool? NewPageBefore { get; set; }
+
+    /// <summary>setSectionBreak: start a new page AFTER this section prints. Optional; see <see cref="NewPageBefore"/>.</summary>
+    public bool? NewPageAfter { get; set; }
+
+    /// <summary>
+    /// addSpecialField: which Crystal special field to place. One of
+    /// <see cref="SpecialFieldTypes.All"/> - the validator's allowlist is the contract.
+    /// </summary>
+    public string? SpecialType { get; set; }
+
+    /// <summary>setNumberFormat: digits after the decimal point, 0-10. Optional.</summary>
+    public int? DecimalPlaces { get; set; }
+
+    /// <summary>setNumberFormat: group digits with a thousands separator. Optional.</summary>
+    public bool? ThousandsSeparator { get; set; }
+
+    /// <summary>setNumberFormat: print nothing when the value is zero. Optional.</summary>
+    public bool? SuppressIfZero { get; set; }
+
+    /// <summary>setCanGrow: let the object grow vertically to fit its content. Required for setCanGrow.</summary>
+    public bool? CanGrow { get; set; }
+
+    /// <summary>
+    /// setSuppress: hide the object (<see cref="Target"/>) or the section (<see cref="Section"/>).
+    /// Required for setSuppress. EnableSuppress is one Crystal concept with two hosts, which is
+    /// why setSuppress takes either -- exactly one of target or section, never both.
+    /// </summary>
+    public bool? Suppress { get; set; }
+
+    /// <summary>
+    /// setSuppress: also hide the section when every object in it is blank. Optional, and valid
+    /// ONLY with <see cref="Section"/> -- EnableSuppressIfBlank exists on ISCRSectionFormat and
+    /// has no counterpart on ISCRObjectFormat, so supplying it alongside a target is rejected
+    /// rather than silently ignored.
+    /// </summary>
+    public bool? SuppressIfBlank { get; set; }
 }

@@ -30,7 +30,14 @@ public sealed class SectionInfo
     /// <summary>Human-readable band: ReportHeader, PageHeader, GroupHeader, Details, GroupFooter, ReportFooter, PageFooter.</summary>
     public string Kind { get; set; } = "";
     public int HeightTwips { get; set; }
+    /// <summary>Set by apply_layout's setSuppress (section form). ISCRSectionFormat.EnableSuppress.</summary>
     public bool Suppressed { get; set; }
+    /// <summary>Start a new page before this section prints. Set by setSectionBreak.</summary>
+    public bool NewPageBefore { get; set; }
+    /// <summary>Start a new page after this section prints. Set by setSectionBreak.</summary>
+    public bool NewPageAfter { get; set; }
+    /// <summary>Hide this section when every object in it is blank. Set by setSuppress's suppressIfBlank.</summary>
+    public bool SuppressIfBlank { get; set; }
     /// <summary>"#RRGGBB", or null when the section has no background colour set.</summary>
     public string? BackgroundColorHex { get; set; }
     public List<ObjectInfo> Objects { get; set; } = new List<ObjectInfo>();
@@ -81,6 +88,34 @@ public sealed class ObjectInfo
 
     /// <summary>Populated only for Kind == "Subreport". Null otherwise.</summary>
     public List<SubreportLinkInfo>? SubreportLinks { get; set; }
+
+    /// <summary>
+    /// The object grows vertically to fit its content instead of clipping it. Set by setCanGrow.
+    /// ISCRObjectFormat.EnableCanGrow, which every report object carries.
+    /// </summary>
+    public bool CanGrow { get; set; }
+
+    /// <summary>The object is hidden. Set by setSuppress (object form). ISCRObjectFormat.EnableSuppress.</summary>
+    public bool Suppressed { get; set; }
+
+    /// <summary>
+    /// Numeric display format, populated only for Kind == "Field" and null for every other kind
+    /// (a Text object has no ISCRFieldFormat at all -- measured). Set by setNumberFormat.
+    /// Also left null when the format cannot be read, rather than failing the whole report read.
+    /// </summary>
+    public NumberFormatInfo? NumberFormat { get; set; }
+}
+
+/// <summary>
+/// How a Field object renders a number, as written by setNumberFormat and read back here.
+/// The three properties are exactly the three the operation writes, so a round-trip assertion
+/// cannot pass by checking something the applier never touched.
+/// </summary>
+public sealed class NumberFormatInfo
+{
+    public int DecimalPlaces { get; set; }
+    public bool ThousandsSeparator { get; set; }
+    public bool SuppressIfZero { get; set; }
 }
 
 /// <summary>One main-report-to-subreport field link, as set by setSubreportLink.</summary>

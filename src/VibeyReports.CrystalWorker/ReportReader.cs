@@ -58,7 +58,14 @@ namespace VibeyReports.CrystalWorker
                         Name = section.Name,
                         Kind = band,
                         HeightTwips = section.Height,
+                        // Every property setSectionBreak and setSuppress's section form can write
+                        // is read back here. A write-only property leaves the agent blind, and a
+                        // round-trip test that asserts a DIFFERENT property than the one written
+                        // can never fail -- this project has shipped that mistake twice.
                         Suppressed = section.Format != null && section.Format.EnableSuppress,
+                        NewPageBefore = section.Format != null && section.Format.EnableNewPageBefore,
+                        NewPageAfter = section.Format != null && section.Format.EnableNewPageAfter,
+                        SuppressIfBlank = section.Format != null && section.Format.EnableSuppressIfBlank,
                         BackgroundColorHex = section.Format == null ? null : ColorRef.ToHex(section.Format.BackgroundColor)
                     };
 
@@ -117,7 +124,11 @@ namespace VibeyReports.CrystalWorker
                 TopTwips = ro.Top,
                 WidthTwips = ro.Width,
                 HeightTwips = ro.Height,
-                Alignment = ro.Format == null ? null : ClassifyAlignment(ro.Format.HorizontalAlignment)
+                Alignment = ro.Format == null ? null : ClassifyAlignment(ro.Format.HorizontalAlignment),
+                // What setCanGrow and setSuppress's object form write. ISCRObjectFormat is carried
+                // by every report object kind, so these are read for all of them, not just fields.
+                CanGrow = ro.Format != null && ro.Format.EnableCanGrow,
+                Suppressed = ro.Format != null && ro.Format.EnableSuppress
             };
 
             switch (ro)
@@ -126,6 +137,7 @@ namespace VibeyReports.CrystalWorker
                     ApplyFont(info, field.FontColor?.Font);
                     info.DataSource = field.DataSource ?? "";
                     if (field.FontColor != null) info.TextColorHex = ColorRef.ToHex(field.FontColor.Color);
+                    info.NumberFormat = ReadNumberFormat(field);
                     break;
 
                 case ISCRTextObject text:
@@ -162,6 +174,41 @@ namespace VibeyReports.CrystalWorker
             }
 
             return info;
+        }
+
+        /// <summary>
+        /// Reads back exactly the three properties setNumberFormat writes, so the operation is not
+        /// write-only and a round-trip test asserts the same properties it set.
+        ///
+        /// Measured on SampleReport.rpt: ISCRFieldFormat.NumericFormat is present and readable on
+        /// every Field object regardless of its value type -- a String field (CardName1,
+        /// crFieldValueTypeStringField) still reports NDecimalPlaces=2 -- so this is not restricted
+        /// to numeric fields. A Text object has no ISCRFieldFormat at all, which is why this is
+        /// only called from the ISCRFieldObject arm.
+        ///
+        /// Wrapped defensively, exactly as ReadSubreportLinks is: an unusual field kind that throws
+        /// or returns nothing here must leave the property null, not fail the whole report read.
+        /// </summary>
+        private static Contracts.NumberFormatInfo ReadNumberFormat(ISCRFieldObject field)
+        {
+            try
+            {
+                var numeric = field.FieldFormat?.NumericFormat;
+                if (numeric == null) return null;
+
+                return new Contracts.NumberFormatInfo
+                {
+                    DecimalPlaces = numeric.NDecimalPlaces,
+                    ThousandsSeparator = numeric.ThousandsSeparator,
+                    SuppressIfZero = numeric.EnableSuppressIfZero
+                };
+            }
+            catch
+            {
+                // Deliberately bare, matching ReadSubreportLinks and the AvailableFields walk: a
+                // format that cannot be read is a null property, never a failed read.
+                return null;
+            }
         }
 
         /// <summary>

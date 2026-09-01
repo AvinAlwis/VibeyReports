@@ -75,9 +75,61 @@ public class LayoutPlanTests
             "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField", "removeObject",
             "setTextColor", "setFillColor", "setLineColor", "setSectionBackground",
             "addSubreport", "setSubreportLink",
-            "removeTable", "addTable", "setTableLocation"
+            "removeTable", "addTable", "setTableLocation",
+            "setSectionBreak", "addSpecialField", "setNumberFormat", "setCanGrow", "setSuppress"
         });
-        LayoutActions.All.Should().HaveCount(21);
+        LayoutActions.All.Should().HaveCount(26);
+    }
+
+    [Fact]
+    public void SpecialFieldTypes_All_ContainsEverySupportedTypeAndNothingElse()
+    {
+        SpecialFieldTypes.All.Should().BeEquivalentTo(new[]
+        {
+            "pageNumber", "pageNOfM", "totalPageCount",
+            "printDate", "printTime", "reportTitle", "recordNumber"
+        });
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesTheFormattingFields()
+    {
+        const string json = """
+        {
+          "planVersion": 1,
+          "operations": [
+            { "action": "setSectionBreak", "section": "DetailSection1", "newPageAfter": true },
+            { "action": "addSpecialField", "section": "PageFooterSection1", "newName": "Pager",
+              "specialType": "pageNOfM", "leftTwips": 0, "topTwips": 0, "widthTwips": 1440,
+              "heightTwips": 240 },
+            { "action": "setNumberFormat", "target": "GoalId", "decimalPlaces": 0,
+              "thousandsSeparator": false, "suppressIfZero": true },
+            { "action": "setCanGrow", "target": "Comment", "canGrow": true },
+            { "action": "setSuppress", "section": "DetailSection1", "suppress": true,
+              "suppressIfBlank": true }
+          ]
+        }
+        """;
+
+        var plan = JsonSerializer.Deserialize<LayoutPlan>(json, VibeyJson.Options)!;
+
+        plan.Operations[0].Action.Should().Be(LayoutActions.SetSectionBreak);
+        plan.Operations[0].NewPageAfter.Should().BeTrue();
+        // Absent, not false: the applier writes only what was supplied, so the two must be
+        // distinguishable.
+        plan.Operations[0].NewPageBefore.Should().BeNull();
+
+        plan.Operations[1].Action.Should().Be(LayoutActions.AddSpecialField);
+        plan.Operations[1].SpecialType.Should().Be("pageNOfM");
+
+        plan.Operations[2].DecimalPlaces.Should().Be(0);
+        plan.Operations[2].ThousandsSeparator.Should().BeFalse();
+        plan.Operations[2].SuppressIfZero.Should().BeTrue();
+
+        plan.Operations[3].CanGrow.Should().BeTrue();
+
+        plan.Operations[4].Suppress.Should().BeTrue();
+        plan.Operations[4].SuppressIfBlank.Should().BeTrue();
     }
 
     [Fact]

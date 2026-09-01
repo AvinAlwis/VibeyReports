@@ -21,6 +21,22 @@ public static class LayoutPlanValidator
     private static readonly HashSet<string> FontableKinds =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field", "FieldHeading" };
 
+    /// <summary>
+    /// setCanGrow only makes sense on an object that holds flowing content it could be clipping.
+    /// ISCRObjectFormat.EnableCanGrow is structurally present on every report object (a Line and a
+    /// Box carry one too), so this restriction is semantic, not structural.
+    /// </summary>
+    private static readonly HashSet<string> CanGrowKinds =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field" };
+
+    /// <summary>
+    /// addSpecialField's allowlist. An unknown specialType must be rejected here, not passed
+    /// through to a COM call that would fail with a message naming a Crystal enum the caller
+    /// never wrote.
+    /// </summary>
+    private static readonly HashSet<string> SpecialTypes =
+        new HashSet<string>(SpecialFieldTypes.All, StringComparer.OrdinalIgnoreCase);
+
     public static ValidationResult Validate(LayoutPlan plan, ReportSchema schema)
     {
         var result = new ValidationResult { IsValid = true };
@@ -164,10 +180,39 @@ public static class LayoutPlanValidator
             return errs;
         }
 
+        // setSuppress is the one operation whose HOST is chosen by the caller: EnableSuppress
+        // exists on both ISCRSectionFormat and ISCRObjectFormat, so it is one operation taking
+        // either an object or a section -- not two operations. (Contrast setFillColor /
+        // setSectionBackground, which are two operations because they write two DIFFERENT
+        // properties, FillColor and BackgroundColor.) Which one was supplied decides whether this
+        // operation joins needsTarget or needsSection below, so it has to be settled first, and
+        // an ambiguous or empty choice is rejected before either lookup is attempted.
+        var suppressOnObject = false;
+        var suppressOnSection = false;
+        if (action == LayoutActions.SetSuppress)
+        {
+            suppressOnObject = !string.IsNullOrWhiteSpace(op.Target);
+            suppressOnSection = !string.IsNullOrWhiteSpace(op.Section);
+
+            if (suppressOnObject && suppressOnSection)
+            { Err("\"setSuppress\" takes exactly one of \"target\" (an object) or \"section\", not both."); return errs; }
+            if (!suppressOnObject && !suppressOnSection)
+            { Err("\"setSuppress\" requires exactly one of \"target\" (an object) or \"section\"."); return errs; }
+            if (suppressOnObject && op.SuppressIfBlank is not null)
+            {
+                Err("\"suppressIfBlank\" is valid only with \"section\": it is a section property " +
+                    "(ISCRSectionFormat.EnableSuppressIfBlank) with no counterpart on a report object. " +
+                    "Drop it, or target a section instead.");
+                return errs;
+            }
+        }
+
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
             or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment
             or LayoutActions.RemoveObject
-            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor;
+            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor
+            or LayoutActions.SetNumberFormat or LayoutActions.SetCanGrow
+            || suppressOnObject;
         // F2: setSubreportLink is deliberately NOT in needsTarget -- its target is resolved
         // against subreportsByName (the SubreportName name-space), not `objects` (the report
         // object name-space). Resolving it here would look the name up in the wrong namespace.
@@ -185,7 +230,9 @@ public static class LayoutPlanValidator
 
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
             or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField
-            or LayoutActions.SetSectionBackground or LayoutActions.AddSubreport;
+            or LayoutActions.SetSectionBackground or LayoutActions.AddSubreport
+            or LayoutActions.SetSectionBreak or LayoutActions.AddSpecialField
+            || suppressOnSection;
 
         SimObject? target = null;
         if (needsTarget)
@@ -340,11 +387,73 @@ public static class LayoutPlanValidator
                 CheckColor(op.Color, Err);
                 break;
 
+            case LayoutActions.SetSectionBreak:
+                // Section existence was already checked by the shared needsSection block above.
+                // Both booleans optional, but an operation supplying NEITHER is a no-op, and a
+                // silent no-op is worse than a plan error: the caller believes a page break was
+                // inserted and only finds out from the rendered PDF.
+                if (op.NewPageBefore is null && op.NewPageAfter is null)
+                    Err("\"setSectionBreak\" requires \"newPageBefore\", \"newPageAfter\", or both.");
+                break;
+
+            case LayoutActions.SetNumberFormat:
+            {
+                // Kind, and ONLY kind. Deliberately NOT a check that the field holds a number:
+                // a field's value type is knowable only from schema.AvailableFields, which
+                // ReportReader CLEARS whenever the data source cannot be enumerated (no database
+                // connection -- a normal, supported state). Rejecting on the empty list would make
+                // this operation fail whenever the VPN is down, which is exactly the trap
+                // removeTable's existence check already sidesteps. Crystal itself carries a
+                // NumericFormat on every Field object regardless of value type (measured: a String
+                // field on SampleReport.rpt reports NDecimalPlaces=2), so writing one to a
+                // non-numeric field is harmless and simply does not render.
+                if (!string.Equals(target!.Kind, "Field", StringComparison.OrdinalIgnoreCase))
+                {
+                    Err($"Object \"{op.Target}\" is a {target.Kind}, not a Field, and has no number format. " +
+                        "setNumberFormat applies to Field objects only.");
+                    break;
+                }
+
+                if (op.DecimalPlaces is null && op.ThousandsSeparator is null && op.SuppressIfZero is null)
+                {
+                    Err("\"setNumberFormat\" requires at least one of \"decimalPlaces\", " +
+                        "\"thousandsSeparator\" or \"suppressIfZero\".");
+                    break;
+                }
+
+                if (op.DecimalPlaces is not null && (op.DecimalPlaces < 0 || op.DecimalPlaces > 10))
+                    Err($"\"decimalPlaces\" must be between 0 and 10; got {op.DecimalPlaces}.");
+                break;
+            }
+
+            case LayoutActions.SetCanGrow:
+                if (!CanGrowKinds.Contains(target!.Kind ?? ""))
+                {
+                    Err($"Object \"{op.Target}\" is a {target.Kind}; \"canGrow\" applies to objects that " +
+                        "hold text (Text or Field), which are the only ones with content to grow for.");
+                    break;
+                }
+                if (op.CanGrow is null) Err("\"setCanGrow\" requires \"canGrow\".");
+                break;
+
+            case LayoutActions.SetSuppress:
+                // The target/section exclusivity, the suppressIfBlank-needs-a-section rule and the
+                // existence of whichever host was named have all been settled above; only the
+                // required value itself is left.
+                if (op.Suppress is null) Err("\"setSuppress\" requires \"suppress\".");
+                break;
+
             case LayoutActions.AddText:
             case LayoutActions.AddLine:
             case LayoutActions.AddBox:
             case LayoutActions.AddField:
             case LayoutActions.AddSubreport:
+            // addSpecialField shares this whole block deliberately: it is an ADD, so it needs the
+            // same newName-required, newName-unique and geometry-bounds checks every other add
+            // gets, and KindForAdd registers it as a "Field" so setFontSize/setBold on a special
+            // field placed earlier in the same plan validate rather than being refused as
+            // unfontable.
+            case LayoutActions.AddSpecialField:
             {
                 if (string.IsNullOrWhiteSpace(op.NewName)) { Err($"\"{action}\" requires \"newName\"."); return errs; }
                 if (objects.ContainsKey(op.NewName!)) { Err($"An object named \"{op.NewName}\" already exists in the report."); return errs; }
@@ -368,6 +477,21 @@ public static class LayoutPlanValidator
                     {
                         Err($"\"{op.FieldRef}\" is not a field in this report's data source. " +
                             "Use one of the formulaForm values from the report schema's availableFields.");
+                        return errs;
+                    }
+                }
+
+                if (action == LayoutActions.AddSpecialField)
+                {
+                    if (string.IsNullOrWhiteSpace(op.SpecialType))
+                    {
+                        Err($"\"addSpecialField\" requires \"specialType\". Supported: {string.Join(", ", SpecialFieldTypes.All)}.");
+                        return errs;
+                    }
+                    if (!SpecialTypes.Contains(op.SpecialType!))
+                    {
+                        Err($"\"{op.SpecialType}\" is not a supported specialType. " +
+                            $"Supported: {string.Join(", ", SpecialFieldTypes.All)}.");
                         return errs;
                     }
                 }
@@ -432,6 +556,9 @@ public static class LayoutPlanValidator
                         Kind = KindForAdd(action), AddedInPlan = true,
                         // Only addField binds to a table. Carrying the fieldRef here is what makes
                         // "addField from table T, then removeTable T" reject in the same plan.
+                        // addSpecialField deliberately leaves this null even though it also adds a
+                        // Field: a special field is computed by Crystal (page number, print date)
+                        // and belongs to no table, so it must never make a table unremovable.
                         DataSource = action == LayoutActions.AddField ? op.FieldRef : null
                     };
                     objects[op.NewName!] = added;
@@ -657,10 +784,15 @@ public static class LayoutPlanValidator
     }
 
     private static string KindForAdd(string action) =>
-        action == LayoutActions.AddText       ? "Text"
-      : action == LayoutActions.AddLine       ? "Line"
-      : action == LayoutActions.AddField      ? "Field"
-      : action == LayoutActions.AddSubreport  ? "Subreport"
+        action == LayoutActions.AddText          ? "Text"
+      : action == LayoutActions.AddLine          ? "Line"
+      : action == LayoutActions.AddField         ? "Field"
+      // A special field IS a field object -- ReportReader classifies the placed object as
+      // Kind "Field" (measured: SampleReport's PrintDate1/PageNumber1 are
+      // crReportObjectKindField), so the simulation must agree or a setFontSize on one added
+      // earlier in the same plan would be judged against the wrong kind.
+      : action == LayoutActions.AddSpecialField  ? "Field"
+      : action == LayoutActions.AddSubreport     ? "Subreport"
       : "Box";
 
     private sealed class SimObject

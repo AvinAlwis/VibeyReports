@@ -21,8 +21,11 @@ public sealed class ReportTools
     [McpServerTool(Name = "read_report", ReadOnly = true)]
     [Description("""
         Read a Crystal Reports XI R2 .rpt file and return its layout as JSON: page size and
-        margins in twips, every section with its height and backgroundColorHex, and every object
-        with its name, kind, position, size, font, alignment, and (where applicable)
+        margins in twips, every section with its height, backgroundColorHex and its
+        suppressed/suppressIfBlank/newPageBefore/newPageAfter flags, and every object
+        with its name, kind, position, size, font, alignment, canGrow, suppressed, and (where
+        applicable) numberFormat (decimalPlaces/thousandsSeparator/suppressIfZero, for Field
+        objects) and
         textColorHex/fillColorHex/lineColorHex/subreportName/subreportLinks (a Subreport
         object's own name plus its list of mainReportFieldName/subreportFieldName/
         linkedParameterName links, set by apply_layout's setSubreportLink). A Subreport's
@@ -83,6 +86,14 @@ public sealed class ReportTools
           addTable          target (alias of an existing table whose connection is cloned),
                             tableName, newName
           setTableLocation  target (a table ALIAS), tableName
+          setSectionBreak   section, and newPageBefore and/or newPageAfter (at least one)
+          addSpecialField   section, newName, specialType, leftTwips, topTwips, widthTwips,
+                            heightTwips
+          setNumberFormat   target (a Field), and at least one of decimalPlaces (0-10),
+                            thousandsSeparator, suppressIfZero
+          setCanGrow        target (Text or Field), canGrow
+          setSuppress       suppress, plus EXACTLY ONE of target (any object) or section;
+                            suppressIfBlank is optional and valid only with section
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
@@ -156,6 +167,32 @@ public sealed class ReportTools
         no logon at all, use addSubreport instead - a sub-report brings its own connection.
         addTable also cannot tell you the new table's fields; re-read the report afterwards
         before trying to addField from it.
+        setSectionBreak is how you split a report across pages: newPageAfter on the section that
+        should end a page, or newPageBefore on the one that should start a new one. Sections
+        cannot be added or removed - Crystal's five-band shape is fixed through this SDK - so a
+        page break is set on a section that already exists.
+        addSpecialField places a value Crystal computes at print time rather than one from the
+        data source, so it needs no fieldRef and no availableFields entry. specialType is one of:
+        pageNumber, pageNOfM, totalPageCount, printDate, printTime, reportTitle, recordNumber.
+        Anything else is rejected. Use these for report footers ("Page 1 of 12", a print date)
+        instead of an addText you would have to keep up to date by hand. The placed object is an
+        ordinary Field, so setFontSize, setBold, setAlignment and setTextColor all work on it.
+        setNumberFormat fixes numbers that render wrong: an ID column showing "10,311.00" is
+        decimalPlaces 0 plus thousandsSeparator false. It applies to Field objects only, and only
+        the properties you supply are changed - setting decimalPlaces alone leaves the field's
+        existing thousands separator as it was. The tool does NOT check that the field holds a
+        number, because a field's value type is only knowable when the report's data source can be
+        enumerated, which needs a database connection this tool does not require.
+        setCanGrow lets a Text or Field object grow downwards to fit content instead of clipping
+        it - the fix for a free-text comment column that cuts off mid-sentence.
+        setSuppress hides something. It takes EITHER a target (any object) OR a section, never
+        both, because Crystal's "suppress" is one property that exists on objects and on sections
+        alike. On a section, suppressIfBlank additionally hides the section only when everything in
+        it is blank, which is how you stop an empty sub-report leaving a gap; suppressIfBlank is
+        rejected alongside an object target, since objects have no such property.
+        All five of these read back through read_report, so you can confirm what you set:
+        sections report newPageBefore/newPageAfter/suppressed/suppressIfBlank, and objects report
+        canGrow/suppressed plus numberFormat for Field objects.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.
