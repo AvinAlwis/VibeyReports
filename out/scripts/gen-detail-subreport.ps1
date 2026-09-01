@@ -9,22 +9,14 @@
 #
 # Column widths match the host report exactly so the two line up when embedded.
 #
-# MANUAL STEP THIS SCRIPT CANNOT REPRODUCE -- re-apply it after regenerating:
+# goal_id is a BIGINT, so Crystal's default number format renders it as
+# "10,311.00" - thousands separator and two decimals. setNumberFormat now fixes
+# that here, so it survives regeneration; it used to be a manual Designer step.
 #
-#   goal_id is a BIGINT, so Crystal renders it with its default number format:
-#   thousands separator and two decimals ("10,311.00"). It was fixed by hand in
-#   the Designer with a custom format showing the bare number.
-#
-#   Vibey Reports cannot do this. There is no number-format operation, and more
-#   fundamentally the field lives inside the EMBEDDED sub-report while every
-#   operation acts on the host document -- reach is the problem, not the missing
-#   operation. Casting goal_id to VARCHAR in sp_perf_goal_align_detail would fix
-#   it at the source, but the decision was to keep the column BIGINT.
-#
-#   So: after running this script and re-importing, open the sub-report in the
-#   Designer, right-click the goal_id field > Format Field > Number, and set a
-#   custom format with no decimals and no thousands separator. Otherwise the
-#   regenerated report silently reverts to "10,311.00".
+# Note this only applies to THIS file. The copy already embedded inside
+# PMSV10_GoalAlignCascade.final.rpt is a separate document that layout
+# operations cannot reach, and it carries the equivalent fix applied by hand in
+# the Designer. Re-importing this sub-report would pick up the automated one.
 
 $ops = New-Object System.Collections.ArrayList
 $col = New-Object System.Collections.ArrayList
@@ -81,6 +73,10 @@ for ($c=0; $c -lt 5; $c++) {
   Op @{ action='addField'; section=$DT; newName=$n; fieldRef=$refs[$c];
         leftTwips=($colX[$c]+70); topTwips=130; widthTwips=($colW[$c]-140); heightTwips=640 }
   Op @{ action='setFontSize'; target=$n; fontSizePt=8 }
+  # goal_id is a BIGINT identifier, not a quantity: no decimals, no separators.
+  if ($c -eq 0) { Op @{ action='setNumberFormat'; target=$n; decimalPlaces=0; thousandsSeparator=$false } }
+  # The hierarchy column carries a full parent chain and clips without can-grow.
+  if ($c -eq 3) { Op @{ action='setCanGrow'; target=$n; canGrow=$true } }
   if ($c -eq 0) { Op @{ action='setFont'; target=$n; fontName='Segoe UI' } }   # section font anchor
   Ink $n $INK
   if ($c -gt 0) {

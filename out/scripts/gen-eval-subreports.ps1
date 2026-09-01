@@ -126,6 +126,11 @@ foreach ($rep in $reports) {
     Op @{ action='addField'; section=$DT; newName=$n; fieldRef=("{" + $alias + "." + $cols[$c].f + "}");
           leftTwips=($x[$c]+70); topTwips=120; widthTwips=($cols[$c].w-140); heightTwips=($rowH-240) }
     Op @{ action='setFontSize'; target=$n; fontSizePt=8 }
+    # Every column here can carry long free text - achievements, learning notes,
+    # appraiser and reviewer comments all come from NVARCHAR(2000) columns. Without
+    # can-grow they are clipped at the row height and the reader never learns that
+    # text is missing.
+    Op @{ action='setCanGrow'; target=$n; canGrow=$true }
     if ($c -eq 0) { Op @{ action='setFont'; target=$n; fontName='Segoe UI' } }   # section font anchor
     Ink $n $INK
     if ($c -gt 0) {

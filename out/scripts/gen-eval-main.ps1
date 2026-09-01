@@ -84,7 +84,7 @@ function Band($caption, $tp) {
 Op @{ action='resizeSection'; section=$P1; heightTwips=15800 }
 Op @{ action='resizeSection'; section=$P2; heightTwips=15800 }
 Op @{ action='resizeSection'; section='PageHeaderSection1';   heightTwips=0 }
-Op @{ action='resizeSection'; section='PageFooterSection1';   heightTwips=0 }
+Op @{ action='resizeSection'; section='PageFooterSection1';   heightTwips=420 }
 Op @{ action='resizeSection'; section='ReportFooterSection1'; heightTwips=0 }
 
 # =============================== PAGE 1 =======================================
@@ -229,6 +229,27 @@ foreach ($s in $subs) {
   $y = $y + $s.h + 200
 }
 $p2h = $y
+
+# =============================== PAGE FURNITURE ===============================
+# The spec asks for "Page 1 of 2" in the footer of both pages. Page Footer prints
+# on every page, so one field covers both.
+$SEC = 'PageFooterSection1'
+Op @{ action='addLine'; section=$SEC; newName='FtRule'; leftTwips=0; topTwips=40; widthTwips=$W; heightTwips=0 }
+Stroke 'FtRule' $BORDER
+Op @{ action='addSpecialField'; section=$SEC; newName='PageNo'; specialType='pageNOfM';
+      leftTwips=9186; topTwips=140; widthTwips=2000; heightTwips=220 }
+Op @{ action='setFontSize'; target='PageNo'; fontSizePt=8 }
+Op @{ action='setAlignment'; target='PageNo'; alignment='Right' }
+Ink 'PageNo' $MUTED
+Txt 'FtConf' 'CONFIDENTIAL - Performance Evaluation' 0 140 6000 220 8 $false
+Ink 'FtConf' $MUTED
+
+# Force the split between page 1 and page 2 rather than relying on the Report
+# Header simply filling up. Previously this was a manual Designer step.
+Op @{ action='setSectionBreak'; section=$P1; newPageAfter=$true }
+
+# The summary comment is free narrative text and clips at a fixed height.
+Op @{ action='setCanGrow'; target='ComVal'; canGrow=$true }
 
 foreach ($c in $col) { Op $c }
 
