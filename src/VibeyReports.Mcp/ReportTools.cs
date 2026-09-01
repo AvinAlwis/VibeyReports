@@ -23,7 +23,9 @@ public sealed class ReportTools
         Read a Crystal Reports XI R2 .rpt file and return its layout as JSON: page size and
         margins in twips, every section with its height and backgroundColorHex, and every object
         with its name, kind, position, size, font, alignment, and (where applicable)
-        textColorHex/fillColorHex/lineColorHex. All colours are "#RRGGBB"; a null colour field
+        textColorHex/fillColorHex/lineColorHex/subreportLinks (a Subreport object's list of
+        mainReportFieldName/subreportFieldName/linkedParameterName links, set by
+        apply_layout's setSubreportLink). All colours are "#RRGGBB"; a null colour field
         means that property has never been explicitly set (not "black" or "white"). Also returns
         availableFields: the database fields the report's data source exposes, each with a
         formulaForm you can pass as fieldRef to apply_layout's addField action. Object and
@@ -70,6 +72,9 @@ public sealed class ReportTools
           setFillColor    target, color (Box only)
           setLineColor    target, color (Line or Box)
           setSectionBackground  section, color (any section)
+          addSubreport    section, newName, reportPath, leftTwips, topTwips, widthTwips,
+                          heightTwips
+          setSubreportLink  target, mainReportField, subreportField, linkedParameter
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
@@ -87,6 +92,24 @@ public sealed class ReportTools
         removal is permanent in that new file. Removals are listed in the response under
         "removedObjects" so you can see exactly what was deleted. Section removal is not
         supported - resizeSection to 0 covers collapsing a section instead.
+        addSubreport is how you combine a second data source into one report - Crystal Reports
+        can bind only one data source per report object, so a report needing rows from a second
+        stored procedure or table embeds a sub-report rather than adding a second table to the
+        main report. reportPath must be an absolute path to an existing .rpt; the sub-report
+        brings its own data source with it, so no addTable/setDataSource step is needed or
+        supported. setSubreportLink wires one of the sub-report's parameters to a main-report
+        field so the sub-report only shows rows relevant to the current main-report row (e.g. the
+        current employee); each linked parameter needs its own setSubreportLink call - a report
+        that needs both an evaluation-cycle link and an employee-number link issues two
+        setSubreportLink operations against the same target, and both survive (links accumulate,
+        they do not replace each other). target for setSubreportLink must be a Subreport object,
+        and MUST be the newName you gave that sub-report in the same plan's own addSubreport
+        operation, not a name read back from a prior read_report - a sub-report's placed object is
+        given an internal, auto-numbered name (e.g. "Subreport1") by Crystal that is DIFFERENT from
+        the name you chose, and setSubreportLink only resolves by the name you chose. Only
+        linking a sub-report added earlier in the SAME plan is supported; setSubreportLink against
+        a sub-report from an earlier apply_layout call or already embedded in the source .rpt is
+        not supported and will fail.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using CrystalDecisions.ReportAppServer.ClientDoc;
 using CrystalDecisions.ReportAppServer.DataDefModel;
 using CrystalDecisions.ReportAppServer.ReportDefModel;
 using VibeyReports.Contracts;
@@ -63,7 +65,7 @@ namespace VibeyReports.CrystalWorker
                     var objects = section.ReportObjects;
                     for (var j = 0; j < objects.Count; j++)
                     {
-                        info.Objects.Add(ReadObject((ISCRReportObject)objects[j]));
+                        info.Objects.Add(ReadObject(doc, (ISCRReportObject)objects[j]));
                     }
 
                     schema.Sections.Add(info);
@@ -105,7 +107,7 @@ namespace VibeyReports.CrystalWorker
             return schema;
         }
 
-        private static ObjectInfo ReadObject(ISCRReportObject ro)
+        private static ObjectInfo ReadObject(ISCDReportClientDocument doc, ISCRReportObject ro)
         {
             var info = new ObjectInfo
             {
@@ -140,9 +142,60 @@ namespace VibeyReports.CrystalWorker
                 case ISCRLineObject line:
                     info.LineColorHex = ColorRef.ToHex(line.LineColor);
                     break;
+
+                case ISCRSubreportObject subreport:
+                    // Measured (reflection + a live round-trip against the installed 11.5
+                    // assemblies): the placed report OBJECT's Name (ro.Name, e.g. "Subreport1")
+                    // is Crystal's own auto-numbered container name and is NOT the string
+                    // addSubreport's newName supplied to ImportSubreportEx -- that string instead
+                    // becomes ISCRSubreportObject.SubreportName, the separate identifier
+                    // SubreportController.GetSubreportLinks/SetSubreportLinks are keyed by. Using
+                    // ro.Name here (the container name) would ask GetSubreportLinks for a name
+                    // that was never registered as a sub-report and silently read back nothing.
+                    info.SubreportLinks = ReadSubreportLinks(doc, subreport.SubreportName);
+                    break;
             }
 
             return info;
+        }
+
+        /// <summary>
+        /// The same lesson this project has learned twice over: a write-only API leaves the agent
+        /// blind, and a round-trip test that reads a different property than it writes can never
+        /// fail. This reads back exactly what SetSubreportLinks was given, via GetSubreportLinks.
+        /// Wrapped defensively -- a sub-report with no links yet may throw here rather than return
+        /// an empty collection -- so a sub-report before its first setSubreportLink call still
+        /// reads back cleanly with an empty list instead of failing the whole report read.
+        /// </summary>
+        private static List<SubreportLinkInfo> ReadSubreportLinks(
+            ISCDReportClientDocument doc, string subreportName)
+        {
+            var result = new List<SubreportLinkInfo>();
+            try
+            {
+                // GetSubreportLinks is COM-typed to the marker interface SubreportLinks, but
+                // Count/Item live on the "ISCR" dual interface the same concrete
+                // SubreportLinksClass also implements -- verified by reflecting the installed
+                // 11.5 ReportDefModel assembly.
+                var links = (ISCRSubreportLinks)doc.SubreportController.GetSubreportLinks(subreportName);
+                for (var i = 0; i < links.Count; i++)
+                {
+                    var link = (ISCRSubreportLink)links[i];
+                    result.Add(new SubreportLinkInfo
+                    {
+                        MainReportFieldName = link.MainReportFieldName ?? "",
+                        SubreportFieldName = link.SubreportFieldName ?? "",
+                        LinkedParameterName = link.LinkedParameterName ?? ""
+                    });
+                }
+            }
+            catch
+            {
+                // Deliberately bare, matching AvailableFields' read-time contract above: a
+                // sub-report with no links yet must not fail the whole report read.
+            }
+
+            return result;
         }
 
         // VERIFIED: FontColor.Font is CrystalDecisions.ReportAppServer.ReportDefModel.Font

@@ -20,12 +20,14 @@ public static class LayoutActions
     public const string SetFillColor = "setFillColor";
     public const string SetLineColor = "setLineColor";
     public const string SetSectionBackground = "setSectionBackground";
+    public const string AddSubreport = "addSubreport";
+    public const string SetSubreportLink = "setSubreportLink";
 
     public static readonly string[] All =
     {
         Move, Resize, SetFont, SetFontSize, SetBold,
         SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject,
-        SetTextColor, SetFillColor, SetLineColor, SetSectionBackground
+        SetTextColor, SetFillColor, SetLineColor, SetSectionBackground, AddSubreport, SetSubreportLink
     };
 }
 
@@ -74,4 +76,16 @@ public sealed class LayoutOperation
 
     /// <summary>Colour as "#RRGGBB", e.g. "#1F2A37". Required by the colour operations.</summary>
     public string? Color { get; set; }
+
+    /// <summary>Absolute path to an existing .rpt to import as a sub-report. Required for addSubreport.</summary>
+    public string? ReportPath { get; set; }
+
+    /// <summary>Main-report field to link FROM, e.g. "{sp_x;1.performance_cycle_id}". Required for setSubreportLink.</summary>
+    public string? MainReportField { get; set; }
+
+    /// <summary>Matching field inside the sub-report to link TO. Required for setSubreportLink.</summary>
+    public string? SubreportField { get; set; }
+
+    /// <summary>Sub-report parameter that receives the linked value, e.g. "@performance_cycle_id". Required for setSubreportLink.</summary>
+    public string? LinkedParameter { get; set; }
 }

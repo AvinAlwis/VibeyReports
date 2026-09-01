@@ -66,6 +66,17 @@ public sealed class ObjectInfo
     public string? FillColorHex { get; set; }
     /// <summary>"#RRGGBB" outline colour for Line/Box objects; null when not applicable.</summary>
     public string? LineColorHex { get; set; }
+
+    /// <summary>Populated only for Kind == "Subreport". Null otherwise.</summary>
+    public List<SubreportLinkInfo>? SubreportLinks { get; set; }
+}
+
+/// <summary>One main-report-to-subreport field link, as set by setSubreportLink.</summary>
+public sealed class SubreportLinkInfo
+{
+    public string MainReportFieldName { get; set; } = "";
+    public string SubreportFieldName { get; set; } = "";
+    public string LinkedParameterName { get; set; } = "";
 }
 
 public sealed class FieldInfo

@@ -1115,4 +1115,153 @@ public class LayoutApplierTests
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
+
+    // --- addSubreport / setSubreportLink ---
+
+    /// <summary>
+    /// Imports tests/fixtures/SampleReport.rpt as a sub-report into PMSV10_IndPerfOverview.rpt and
+    /// asserts an object of kind Subreport exists at the requested geometry after save/reopen.
+    /// Measured (see task report): ImportSubreportEx's "Name" argument becomes
+    /// ISCRSubreportObject.SubreportName, NOT the placed report OBJECT's own Name -- Crystal
+    /// auto-numbers the container object itself ("Subreport3" here, since the fixture already has
+    /// two). So this locates the added object by kind+geometry rather than by NewName, which would
+    /// never match.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsASubreportAndItExistsAtTheRequestedGeometryAfterSaveAndReopen()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyGoalDetail",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 100, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                .SingleOrDefault(o => o.Kind == "Subreport" && o.LeftTwips == 100 && o.TopTwips == 20
+                                       && o.WidthTwips == 3000 && o.HeightTwips == 300);
+            added.Should().NotBeNull();
+            added!.Kind.Should().Be("Subreport");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The priority test for setSubreportLink: SubreportController.SetSubreportLinks replaces the
+    /// ENTIRE link collection for the named sub-report, so a naive "build one link and set it"
+    /// implementation would let the second setSubreportLink call silently discard the first -- a
+    /// report needing both an evaluation-cycle link and an employee-number link would then only
+    /// ever apply the last one, discarding real HR data. Two independent setSubreportLink
+    /// operations must both survive save/reopen, in order.
+    ///
+    /// Round-trips MainReportFieldName/SubreportFieldName exactly. Measured directly against the
+    /// installed 11.5 RAS (three separate probes, not assumed): LinkedParameterName does NOT
+    /// reliably round-trip as given when the target sub-report has no pre-existing parameter by
+    /// that name.
+    ///   1. LinkedParameterName as a bare string (e.g. "@performance_cycle_id") -- SetSubreportLinks
+    ///      itself did not throw, but the SUBSEQUENT SaveAs threw COMException "Invalid value type."
+    ///   2. LinkedParameterName in Crystal's own formula form (e.g. "{?performance_cycle_id}") with
+    ///      matching MainReportFieldName/SubreportFieldName value types -- SetSubreportLinks
+    ///      succeeded and SaveAs succeeded, but on reopen LinkedParameterName came back as
+    ///      Crystal's own auto-generated "{?Pm-&lt;mainReportField&gt;}", not the string given.
+    ///   3. Same as (2), but with a matching CrystalDecisions.ReportAppServer.DataDefModel.
+    ///      ParameterFieldClass pre-registered on the sub-report via
+    ///      DataDefController.ParameterFieldController.Add() before calling SetSubreportLinks --
+    ///      same "Pm-" substitution still happened, so a minimally-constructed ParameterField is
+    ///      not sufficient to make Crystal treat it as the "already exists" case.
+    /// SampleReport.rpt (this fixture's sub-report) defines no parameters of its own, so no fixture
+    /// available to this test avoids the substitution. This asserts the two LinkedParameterName
+    /// values actually persisted are distinct (proving both links are genuinely present, not one
+    /// clobbering the other) rather than an exact literal string Crystal itself does not guarantee
+    /// to preserve. Whether the substituted parameter still feeds a real stored-procedure input
+    /// parameter on a genuinely SP-parameterised sub-report (the customer's actual case) is
+    /// unverified -- see the task report.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsTwoSubreportLinksAndBothSurviveSaveAndReopenInOrder()
+    {
+        var sourcePath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        string sectionName;
+        string mainField1;
+        string mainField2;
+        using (var s = CrystalSession.Open(sourcePath))
+        {
+            var schema = ReportReader.Read(s);
+            sectionName = schema.Sections.First(x => x.Kind == "Details" && x.HeightTwips >= 400).Name;
+            mainField1 = schema.AvailableFields.First(f => f.FormulaForm.Contains("emp_display_number")).FormulaForm;
+            mainField2 = schema.AvailableFields.First(f => f.FormulaForm.Contains("employee_name")).FormulaForm;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "VibeyLinkedSubreport",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 150, TopTwips = 25, WidthTwips = 3000, HeightTwips = 300
+                },
+                new LayoutOperation
+                {
+                    // setSubreportLink targeting a sub-report added earlier in the same plan --
+                    // the normal usage: SetSubreportLinks/GetSubreportLinks are keyed by the
+                    // sub-report's own name (VibeyLinkedSubreport, exactly the newName above), not
+                    // by the container object's Crystal-assigned name, so "target" here resolves
+                    // correctly without ever needing to know that auto-assigned name.
+                    Action = LayoutActions.SetSubreportLink, Target = "VibeyLinkedSubreport",
+                    MainReportField = mainField1, SubreportField = "{Command.CardCode}",
+                    LinkedParameter = "@performance_cycle_id"
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSubreportLink, Target = "VibeyLinkedSubreport",
+                    MainReportField = mainField2, SubreportField = "{Command.CardName}",
+                    LinkedParameter = "@employee_number"
+                }
+            }
+        };
+
+        var schemaAfter = ApplyAndReread(plan, out var saved, sourcePath);
+        try
+        {
+            var added = schemaAfter.Sections.SelectMany(s => s.Objects)
+                .Single(o => o.Kind == "Subreport" && o.LeftTwips == 150 && o.TopTwips == 25
+                             && o.WidthTwips == 3000 && o.HeightTwips == 300);
+
+            added.SubreportLinks.Should().NotBeNull();
+            added.SubreportLinks!.Should().HaveCount(2,
+                because: "SetSubreportLinks must append, not replace -- two setSubreportLink " +
+                         "calls must leave both links, not just the last one");
+
+            added.SubreportLinks[0].MainReportFieldName.Should().Be(mainField1);
+            added.SubreportLinks[0].SubreportFieldName.Should().Be("{Command.CardCode}");
+
+            added.SubreportLinks[1].MainReportFieldName.Should().Be(mainField2);
+            added.SubreportLinks[1].SubreportFieldName.Should().Be("{Command.CardName}");
+
+            added.SubreportLinks[0].LinkedParameterName.Should().NotBeNullOrEmpty();
+            added.SubreportLinks[1].LinkedParameterName.Should().NotBeNullOrEmpty();
+            added.SubreportLinks[0].LinkedParameterName.Should().NotBe(added.SubreportLinks[1].LinkedParameterName,
+                because: "two distinct links must not have collapsed into the same parameter binding");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
 }

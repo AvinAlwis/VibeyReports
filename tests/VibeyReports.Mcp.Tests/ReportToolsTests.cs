@@ -54,6 +54,60 @@ public class ReportToolsTests
         json.Should().Contain("textColorHex");
     }
 
+    /// <summary>
+    /// The subreport half of the task, at the MCP boundary: read_report's JSON must expose
+    /// subreportLinks for a Subreport-kind object, using a real apply_layout round trip (addSubreport
+    /// then setSubreportLink) rather than a hand-built schema, so a regression anywhere in the
+    /// worker/MCP wiring shows up here too.
+    /// </summary>
+    [Fact]
+    public async Task ReadReport_JsonIncludesSubreportLinksForASubreportObject()
+    {
+        var mainPath = Path.Combine(Fixtures.Dir, "PMSV10_IndPerfOverview.rpt");
+        var schemaJson = await Tools().ReadReport(mainPath, CancellationToken.None);
+        var schema = JsonSerializer.Deserialize<ReportSchema>(schemaJson, VibeyJson.Options)!;
+        var sectionName = schema.Sections.First(s => s.Kind == "Details" && s.HeightTwips >= 400).Name;
+        var mainField = schema.AvailableFields.First().FormulaForm;
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        var planJson = JsonSerializer.Serialize(new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSubreport, Section = sectionName, NewName = "McpLinkedSubreport",
+                    ReportPath = Fixtures.SampleReport,
+                    LeftTwips = 200, TopTwips = 30, WidthTwips = 3000, HeightTwips = 300
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetSubreportLink, Target = "McpLinkedSubreport",
+                    MainReportField = mainField, SubreportField = "{Command.CardCode}",
+                    LinkedParameter = "@performance_cycle_id"
+                }
+            }
+        }, VibeyJson.Options);
+
+        try
+        {
+            var applyResult = await Tools().ApplyLayout(mainPath, dest, planJson, false, CancellationToken.None);
+            applyResult.Should().Contain("\"ok\": true", because: applyResult);
+
+            var readJson = await Tools().ReadReport(dest, CancellationToken.None);
+            readJson.Should().Contain("subreportLinks");
+
+            var readSchema = JsonSerializer.Deserialize<ReportSchema>(readJson, VibeyJson.Options)!;
+            var sub = readSchema.Sections.SelectMany(s => s.Objects)
+                .Single(o => o.Kind == "Subreport" && o.LeftTwips == 200 && o.TopTwips == 30);
+            sub.SubreportLinks.Should().NotBeNull();
+            sub.SubreportLinks!.Should().ContainSingle();
+            sub.SubreportLinks[0].MainReportFieldName.Should().Be(mainField);
+            sub.SubreportLinks[0].SubreportFieldName.Should().Be("{Command.CardCode}");
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
     [Fact]
     public async Task ReadReport_ReturnsAReadableErrorForAMissingFile()
     {

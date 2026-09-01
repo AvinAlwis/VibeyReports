@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -169,6 +170,14 @@ namespace VibeyReports.CrystalWorker
 
                         case LayoutActions.SetSectionBackground:
                             SetSectionBackground(doc, op.Section, op.Color!);
+                            break;
+
+                        case LayoutActions.AddSubreport:
+                            AddSubreport(doc, op);
+                            break;
+
+                        case LayoutActions.SetSubreportLink:
+                            SetSubreportLink(doc, op);
                             break;
 
                         default:
@@ -619,6 +628,96 @@ namespace VibeyReports.CrystalWorker
                 section,
                 CrReportSectionPropertyEnum.crReportSectionPropertyFormat,
                 clone);
+        }
+
+        /// <summary>
+        /// Imports an existing .rpt as a sub-report object. The validator checks reportPath is
+        /// non-empty and ends in ".rpt" but deliberately does no file I/O (it must stay pure), so
+        /// the existence check -- with a message naming the actual path -- lives here.
+        /// </summary>
+        private static void AddSubreport(
+            ISCDReportClientDocument doc,
+            LayoutOperation op)
+        {
+            var section = FindSection(doc, op.Section);
+
+            if (!File.Exists(op.ReportPath))
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"addSubreport\" for \"{op.NewName}\": sub-report file not found: \"{op.ReportPath}\".");
+
+            try
+            {
+                doc.SubreportController.ImportSubreportEx(
+                    op.NewName, op.ReportPath, section,
+                    op.LeftTwips.Value, op.TopTwips.Value, op.WidthTwips.Value, op.HeightTwips.Value);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"addSubreport\" for \"{op.NewName}\" in section \"{section.Name}\": {ex.Message.Trim()}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Sets one main-report-to-subreport field link. SubreportController.SetSubreportLinks
+        /// replaces the ENTIRE link collection for the named sub-report, not just adds to it -- a
+        /// Goal Alignment report needs two links (evaluation cycle and employee number), added by
+        /// two separate setSubreportLink calls, and a naive "build one link and set it" would let
+        /// the second call silently discard the first. So this fetches the sub-report's current
+        /// links first, appends the new one, and only then calls SetSubreportLinks with the whole
+        /// (now-longer) collection. GetSubreportLinks is wrapped defensively: a sub-report with no
+        /// links yet may throw rather than return an empty collection, in which case this starts
+        /// from a fresh SubreportLinksClass instead of failing the whole operation.
+        /// </summary>
+        private static void SetSubreportLink(
+            ISCDReportClientDocument doc,
+            LayoutOperation op)
+        {
+            // Measured (live round-trip against the installed 11.5 assemblies), NOT staleness:
+            // ImportSubreportEx's "Name" argument does not become the placed report OBJECT's own
+            // Name -- Crystal auto-numbers that container object itself ("Subreport1",
+            // "Subreport2", ...; confirmed both immediately after Add and after save/reopen). The
+            // "Name" argument instead becomes ISCRSubreportObject.SubreportName, a second,
+            // separate identifier that SubreportController.GetSubreportLinks/SetSubreportLinks are
+            // keyed by (not object-identity based like ReportObjectController.Modify). So "target"
+            // for setSubreportLink is addSubreport's newName -- the SubreportName -- and must be
+            // used as-is here, NOT resolved through FindObject(doc, op.Target), which looks up by
+            // the (different, auto-assigned) container object Name and would throw "was not
+            // found" for a sub-report added earlier in this same plan. See ReportReader's matching
+            // fix (ISCRSubreportObject.SubreportName, not ro.Name) for the read-back side of the
+            // same split identifier.
+            var subreportName = op.Target!;
+
+            // GetSubreportLinks/SetSubreportLinks are COM-typed to the marker interface
+            // SubreportLinks, but Add/Count/Item live on the "ISCR" dual interface the same
+            // concrete SubreportLinksClass also implements -- verified by reflecting the
+            // installed 11.5 ReportDefModel assembly. Cast to reach them.
+            ISCRSubreportLinks links;
+            try
+            {
+                links = (ISCRSubreportLinks)doc.SubreportController.GetSubreportLinks(subreportName);
+            }
+            catch (COMException)
+            {
+                links = new SubreportLinksClass();
+            }
+
+            links.Add(new SubreportLinkClass
+            {
+                MainReportFieldName = op.MainReportField,
+                SubreportFieldName = op.SubreportField,
+                LinkedParameterName = op.LinkedParameter
+            });
+
+            try
+            {
+                doc.SubreportController.SetSubreportLinks(subreportName, (SubreportLinks)links);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"setSubreportLink\" for \"{op.Target}\": {ex.Message.Trim()}", ex);
+            }
         }
     }
 }

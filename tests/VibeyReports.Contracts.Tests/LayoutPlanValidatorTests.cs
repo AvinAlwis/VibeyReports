@@ -616,6 +616,167 @@ public class LayoutPlanValidatorTests
         result.Errors[0].Message.Should().Contain("not a field in this report");
     }
 
+    // --- addSubreport / setSubreportLink ---
+
+    [Fact]
+    public void Validate_AcceptsAddSubreportWithValidInput()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWithoutReportPath()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("reportPath");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseReportPathDoesNotEndInRpt()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.txt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain(".rpt");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWhoseNewNameCollides()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "CustomerName",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("already exists");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSubreportWithOutOfBoundsGeometry()
+    {
+        // printable width = 12240 - 720 - 720 = 10800; right edge here = 9000 + 3000 = 12000.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+            ReportPath = @"C:\reports\GoalDetail.rpt",
+            LeftTwips = 9000, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("printable width");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSubreportLinkAgainstASubreportAddedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "{sp_perf_goal_align_cascade;1.performance_cycle_id}",
+                SubreportField = "{sp_goal_detail;1.performance_cycle_id}",
+                LinkedParameter = "@performance_cycle_id"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkTargetingATextObject()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetSubreportLink, Target = "Title",
+            MainReportField = "{sp_x;1.performance_cycle_id}",
+            SubreportField = "{sp_y;1.performance_cycle_id}",
+            LinkedParameter = "@performance_cycle_id"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("not a Subreport");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSubreportLinkMissingAnyLinkField()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetSubreportLink, Target = "GoalDetail",
+                MainReportField = "", SubreportField = "{sp_y;1.performance_cycle_id}", LinkedParameter = "@performance_cycle_id"
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("mainReportField");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetFontSizeOnASubreport()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section3", NewName = "GoalDetail",
+                ReportPath = @"C:\reports\GoalDetail.rpt",
+                LeftTwips = 0, TopTwips = 20, WidthTwips = 3000, HeightTwips = 300
+            },
+            new LayoutOperation { Action = LayoutActions.SetFontSize, Target = "GoalDetail", FontSizePt = 10f });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("has no font to change");
+    }
+
     // --- removeObject ---
 
     [Fact]
@@ -698,14 +859,16 @@ public class LayoutPlanValidatorTests
     }
 
     [Fact]
-    public void LayoutActionsAll_HasSixteenEntriesIncludingTheColourActions()
+    public void LayoutActionsAll_HasEighteenEntriesIncludingSubreportActions()
     {
-        LayoutActions.All.Should().HaveCount(16);
+        LayoutActions.All.Should().HaveCount(18);
         LayoutActions.All.Should().Contain(LayoutActions.RemoveObject);
         LayoutActions.All.Should().Contain(LayoutActions.SetTextColor);
         LayoutActions.All.Should().Contain(LayoutActions.SetFillColor);
         LayoutActions.All.Should().Contain(LayoutActions.SetLineColor);
         LayoutActions.All.Should().Contain(LayoutActions.SetSectionBackground);
+        LayoutActions.All.Should().Contain(LayoutActions.AddSubreport);
+        LayoutActions.All.Should().Contain(LayoutActions.SetSubreportLink);
     }
 
     // --- colour operations ---

@@ -118,10 +118,11 @@ public static class LayoutPlanValidator
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
             or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment
             or LayoutActions.RemoveObject
-            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor;
+            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor
+            or LayoutActions.SetSubreportLink;
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
             or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField
-            or LayoutActions.SetSectionBackground;
+            or LayoutActions.SetSectionBackground or LayoutActions.AddSubreport;
 
         SimObject? target = null;
         if (needsTarget)
@@ -260,6 +261,7 @@ public static class LayoutPlanValidator
             case LayoutActions.AddLine:
             case LayoutActions.AddBox:
             case LayoutActions.AddField:
+            case LayoutActions.AddSubreport:
             {
                 if (string.IsNullOrWhiteSpace(op.NewName)) { Err($"\"{action}\" requires \"newName\"."); return errs; }
                 if (objects.ContainsKey(op.NewName!)) { Err($"An object named \"{op.NewName}\" already exists in the report."); return errs; }
@@ -276,6 +278,22 @@ public static class LayoutPlanValidator
                     {
                         Err($"\"{op.FieldRef}\" is not a field in this report's data source. " +
                             "Use one of the formulaForm values from the report schema's availableFields.");
+                        return errs;
+                    }
+                }
+
+                if (action == LayoutActions.AddSubreport)
+                {
+                    // Pure check only: does NOT touch the filesystem. The applier checks the file
+                    // actually exists and throws a clear message naming the path.
+                    if (string.IsNullOrWhiteSpace(op.ReportPath))
+                    {
+                        Err("\"addSubreport\" requires \"reportPath\".");
+                        return errs;
+                    }
+                    if (!op.ReportPath!.EndsWith(".rpt", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Err($"\"reportPath\" must end in \".rpt\"; got \"{op.ReportPath}\".");
                         return errs;
                     }
                 }
@@ -322,6 +340,20 @@ public static class LayoutPlanValidator
                 // afterwards since that check only walks what remains in `objects`.
                 objects.Remove(op.Target!);
                 removedByPlan.Add(op.Target!);
+                break;
+
+            case LayoutActions.SetSubreportLink:
+                // Target existence was already checked by the shared needsTarget block above.
+                // Linking a non-Subreport object (a Text object, say) is a plan error worth
+                // catching here rather than surfacing as a confusing COMException later.
+                if (target!.Kind != "Subreport")
+                {
+                    Err($"Object \"{op.Target}\" is a {target.Kind}, not a Subreport, and cannot take a subreport link.");
+                    break;
+                }
+                if (string.IsNullOrWhiteSpace(op.MainReportField)) Err("\"setSubreportLink\" requires \"mainReportField\".");
+                if (string.IsNullOrWhiteSpace(op.SubreportField)) Err("\"setSubreportLink\" requires \"subreportField\".");
+                if (string.IsNullOrWhiteSpace(op.LinkedParameter)) Err("\"setSubreportLink\" requires \"linkedParameter\".");
                 break;
 
             case LayoutActions.ResizeSection:
@@ -376,9 +408,10 @@ public static class LayoutPlanValidator
     }
 
     private static string KindForAdd(string action) =>
-        action == LayoutActions.AddText  ? "Text"
-      : action == LayoutActions.AddLine  ? "Line"
-      : action == LayoutActions.AddField ? "Field"
+        action == LayoutActions.AddText       ? "Text"
+      : action == LayoutActions.AddLine       ? "Line"
+      : action == LayoutActions.AddField      ? "Field"
+      : action == LayoutActions.AddSubreport  ? "Subreport"
       : "Box";
 
     private sealed class SimObject
