@@ -142,6 +142,36 @@ namespace VibeyReports.CrystalWorker
                             result.RemovedObjects.Add(op.Target!);
                             break;
 
+                        case LayoutActions.SetTextColor:
+                            ModifyObject(doc, op.Target, o => WithFontColor(o, fc => fc.Color = ColorRef.FromHex(op.Color!)));
+                            break;
+
+                        case LayoutActions.SetFillColor:
+                            ModifyObject(doc, op.Target, o =>
+                            {
+                                if (o is not ISCRBoxObject box)
+                                    throw new InvalidOperationException($"Object \"{o.Name}\" ({o.Kind}) is not a Box; has no fill colour.");
+                                box.FillColor = ColorRef.FromHex(op.Color!);
+                            });
+                            break;
+
+                        case LayoutActions.SetLineColor:
+                            ModifyObject(doc, op.Target, o =>
+                            {
+                                switch (o)
+                                {
+                                    case ISCRLineObject line: line.LineColor = ColorRef.FromHex(op.Color!); break;
+                                    case ISCRBoxObject box: box.LineColor = ColorRef.FromHex(op.Color!); break;
+                                    default:
+                                        throw new InvalidOperationException($"Object \"{o.Name}\" ({o.Kind}) is not a Line or Box; has no line colour.");
+                                }
+                            });
+                            break;
+
+                        case LayoutActions.SetSectionBackground:
+                            SetSectionBackground(doc, op.Section, op.Color!);
+                            break;
+
                         default:
                             throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
                     }
@@ -210,6 +240,28 @@ namespace VibeyReports.CrystalWorker
                 throw new InvalidOperationException($"Object \"{obj.Name}\" has no font object.");
 
             mutate(fontColor.Font);
+        }
+
+        /// <summary>
+        /// Same object-kind resolution as <see cref="WithFont"/>, but hands the mutation the
+        /// ISCRFontColor itself rather than its nested ISCRFont -- setTextColor writes
+        /// FontColor.Color, a property WithFont's signature has no way to reach.
+        /// </summary>
+        private static void WithFontColor(ISCRReportObject obj, Action<ISCRFontColor> mutate)
+        {
+            ISCRFontColor fontColor;
+            switch (obj)
+            {
+                case ISCRFieldObject field: fontColor = field.FontColor; break;
+                case ISCRTextObject text: fontColor = text.FontColor; break;
+                default:
+                    throw new InvalidOperationException($"Object \"{obj.Name}\" ({obj.Kind}) has no text colour to change.");
+            }
+
+            if (fontColor == null)
+                throw new InvalidOperationException($"Object \"{obj.Name}\" has no font colour object.");
+
+            mutate(fontColor);
         }
 
         /// <summary>
@@ -538,6 +590,32 @@ namespace VibeyReports.CrystalWorker
                 section,
                 CrReportSectionPropertyEnum.crReportSectionPropertyHeight,
                 heightTwips);
+        }
+
+        /// <summary>
+        /// Measured (reflection against the installed 11.5 Controllers assembly): unlike
+        /// crReportSectionPropertyHeight, CrReportSectionPropertyEnum has no dedicated
+        /// BackgroundColor member -- only Name, Format and Height. BackgroundColor lives on
+        /// ISCRSectionFormat, which is itself get/set on ISCRSection but (per the same
+        /// clone-mutate-commit idiom ModifyObject uses for report objects, and ISCRSectionFormat
+        /// exposing its own Clone(bool)) must be cloned, mutated, and pushed back via
+        /// SetProperty(section, crReportSectionPropertyFormat, clone) rather than assigned
+        /// in place, or the change does not persist to the live document. This is how the AI
+        /// reaches a full-width "dark banner band" design without drawing a Box over the section
+        /// -- see ReportTools' apply_layout description.
+        /// </summary>
+        private static void SetSectionBackground(
+            ISCDReportClientDocument doc,
+            string sectionName,
+            string colorHex)
+        {
+            var section = FindSection(doc, sectionName);
+            var clone = section.Format.Clone(true);
+            clone.BackgroundColor = ColorRef.FromHex(colorHex);
+            doc.ReportDefController.ReportSectionController.SetProperty(
+                section,
+                CrReportSectionPropertyEnum.crReportSectionPropertyFormat,
+                clone);
         }
     }
 }

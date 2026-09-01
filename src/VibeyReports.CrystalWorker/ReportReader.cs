@@ -56,7 +56,8 @@ namespace VibeyReports.CrystalWorker
                         Name = section.Name,
                         Kind = band,
                         HeightTwips = section.Height,
-                        Suppressed = section.Format != null && section.Format.EnableSuppress
+                        Suppressed = section.Format != null && section.Format.EnableSuppress,
+                        BackgroundColorHex = section.Format == null ? null : ColorRef.ToHex(section.Format.BackgroundColor)
                     };
 
                     var objects = section.ReportObjects;
@@ -122,11 +123,22 @@ namespace VibeyReports.CrystalWorker
                 case ISCRFieldObject field:
                     ApplyFont(info, field.FontColor?.Font);
                     info.DataSource = field.DataSource ?? "";
+                    if (field.FontColor != null) info.TextColorHex = ColorRef.ToHex(field.FontColor.Color);
                     break;
 
                 case ISCRTextObject text:
                     ApplyFont(info, text.FontColor?.Font);
                     info.Text = text.Text ?? "";
+                    if (text.FontColor != null) info.TextColorHex = ColorRef.ToHex(text.FontColor.Color);
+                    break;
+
+                case ISCRBoxObject box:
+                    info.FillColorHex = ColorRef.ToHex(box.FillColor);
+                    info.LineColorHex = ColorRef.ToHex(box.LineColor);
+                    break;
+
+                case ISCRLineObject line:
+                    info.LineColorHex = ColorRef.ToHex(line.LineColor);
                     break;
             }
 

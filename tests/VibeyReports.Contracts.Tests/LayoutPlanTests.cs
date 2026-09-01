@@ -64,12 +64,26 @@ public class LayoutPlanTests
     }
 
     [Fact]
-    public void LayoutActions_All_ContainsExactlyTheTwelveActions()
+    public void LayoutActions_All_ContainsExactlyTheSixteenActions()
     {
         LayoutActions.All.Should().BeEquivalentTo(new[]
         {
             "move", "resize", "setFont", "setFontSize", "setBold",
-            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField", "removeObject"
+            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField", "removeObject",
+            "setTextColor", "setFillColor", "setLineColor", "setSectionBackground"
         });
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesColor()
+    {
+        const string json = """
+        { "action": "setTextColor", "target": "CustomerName", "color": "#1F2A37" }
+        """;
+
+        var op = JsonSerializer.Deserialize<LayoutOperation>(json, VibeyJson.Options)!;
+
+        op.Action.Should().Be(LayoutActions.SetTextColor);
+        op.Color.Should().Be("#1F2A37");
     }
 }

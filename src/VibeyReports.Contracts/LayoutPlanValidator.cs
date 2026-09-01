@@ -117,9 +117,11 @@ public static class LayoutPlanValidator
 
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
             or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment
-            or LayoutActions.RemoveObject;
+            or LayoutActions.RemoveObject
+            or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor;
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
-            or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField;
+            or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField
+            or LayoutActions.SetSectionBackground;
 
         SimObject? target = null;
         if (needsTarget)
@@ -233,6 +235,27 @@ public static class LayoutPlanValidator
                     Err($"\"{op.Alignment}\" is not a valid alignment. Use Left, Right, Centre or Justified.");
                 break;
 
+            case LayoutActions.SetTextColor:
+                if (!IsFontable(target!)) { Err($"Object \"{op.Target}\" is a {target!.Kind} and has no text colour to change."); break; }
+                CheckColor(op.Color, Err);
+                break;
+
+            case LayoutActions.SetFillColor:
+                if (target!.Kind != "Box") { Err($"Object \"{op.Target}\" is a {target.Kind}, not a Box, and has no fill colour to change."); break; }
+                CheckColor(op.Color, Err);
+                break;
+
+            case LayoutActions.SetLineColor:
+                if (target!.Kind != "Line" && target.Kind != "Box")
+                { Err($"Object \"{op.Target}\" is a {target.Kind}, not a Line or Box, and has no line colour to change."); break; }
+                CheckColor(op.Color, Err);
+                break;
+
+            case LayoutActions.SetSectionBackground:
+                // Section existence was already checked by the shared needsSection block above.
+                CheckColor(op.Color, Err);
+                break;
+
             case LayoutActions.AddText:
             case LayoutActions.AddLine:
             case LayoutActions.AddBox:
@@ -343,6 +366,17 @@ public static class LayoutPlanValidator
 
     private static bool IsFontable(SimObject o) =>
         FontableKinds.Contains(o.Kind ?? "");
+
+    /// <summary>
+    /// The only input the AI can get wrong in a hundred ways ("red", "rgb(255,0,0)", "#F00",
+    /// "1F2A37" with no hash, trailing whitespace, ...), so the rejection message states the
+    /// exact expected form rather than a generic "invalid colour".
+    /// </summary>
+    private static void CheckColor(string? color, Action<string> err)
+    {
+        if (!ColorRef.IsValidHex(color))
+            err($"\"{color}\" is not a valid colour; expected the form \"#RRGGBB\" (e.g. \"#1F2A37\").");
+    }
 
     private static string KindForAdd(string action) =>
         action == LayoutActions.AddText  ? "Text"

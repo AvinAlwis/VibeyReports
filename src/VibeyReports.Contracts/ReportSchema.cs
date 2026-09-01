@@ -31,6 +31,8 @@ public sealed class SectionInfo
     public string Kind { get; set; } = "";
     public int HeightTwips { get; set; }
     public bool Suppressed { get; set; }
+    /// <summary>"#RRGGBB", or null when the section has no background colour set.</summary>
+    public string? BackgroundColorHex { get; set; }
     public List<ObjectInfo> Objects { get; set; } = new List<ObjectInfo>();
 }
 
@@ -57,6 +59,13 @@ public sealed class ObjectInfo
     public string? DataSource { get; set; }
     /// <summary>Literal text for Text objects.</summary>
     public string? Text { get; set; }
+
+    /// <summary>"#RRGGBB" text colour for Text/Field/FieldHeading objects; null for any other kind.</summary>
+    public string? TextColorHex { get; set; }
+    /// <summary>"#RRGGBB" fill colour for Box objects; null when not applicable, or when the box has no fill set.</summary>
+    public string? FillColorHex { get; set; }
+    /// <summary>"#RRGGBB" outline colour for Line/Box objects; null when not applicable.</summary>
+    public string? LineColorHex { get; set; }
 }
 
 public sealed class FieldInfo

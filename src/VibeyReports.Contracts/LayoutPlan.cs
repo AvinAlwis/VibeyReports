@@ -16,11 +16,16 @@ public static class LayoutActions
     public const string ResizeSection = "resizeSection";
     public const string AddField = "addField";
     public const string RemoveObject = "removeObject";
+    public const string SetTextColor = "setTextColor";
+    public const string SetFillColor = "setFillColor";
+    public const string SetLineColor = "setLineColor";
+    public const string SetSectionBackground = "setSectionBackground";
 
     public static readonly string[] All =
     {
         Move, Resize, SetFont, SetFontSize, SetBold,
-        SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject
+        SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject,
+        SetTextColor, SetFillColor, SetLineColor, SetSectionBackground
     };
 }
 
@@ -66,4 +71,7 @@ public sealed class LayoutOperation
     /// Must exactly match a ReportSchema.AvailableFields[].FormulaForm.
     /// </summary>
     public string? FieldRef { get; set; }
+
+    /// <summary>Colour as "#RRGGBB", e.g. "#1F2A37". Required by the colour operations.</summary>
+    public string? Color { get; set; }
 }

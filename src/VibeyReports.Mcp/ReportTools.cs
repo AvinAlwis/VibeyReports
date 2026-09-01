@@ -21,11 +21,14 @@ public sealed class ReportTools
     [McpServerTool(Name = "read_report", ReadOnly = true)]
     [Description("""
         Read a Crystal Reports XI R2 .rpt file and return its layout as JSON: page size and
-        margins in twips, every section with its height, and every object with its name, kind,
-        position, size, font and alignment. Also returns availableFields: the database fields
-        the report's data source exposes, each with a formulaForm you can pass as fieldRef to
-        apply_layout's addField action. Object and section names in this result are the
-        identifiers you must use in a layout plan. 1440 twips = 1 inch.
+        margins in twips, every section with its height and backgroundColorHex, and every object
+        with its name, kind, position, size, font, alignment, and (where applicable)
+        textColorHex/fillColorHex/lineColorHex. All colours are "#RRGGBB"; a null colour field
+        means that property has never been explicitly set (not "black" or "white"). Also returns
+        availableFields: the database fields the report's data source exposes, each with a
+        formulaForm you can pass as fieldRef to apply_layout's addField action. Object and
+        section names in this result are the identifiers you must use in a layout plan.
+        1440 twips = 1 inch.
         """)]
     public async Task<string> ReadReport(
         [Description("Absolute path to the .rpt file to read.")] string reportPath,
@@ -63,11 +66,21 @@ public sealed class ReportTools
                           heightTwips
           resizeSection   section, heightTwips
           removeObject    target
+          setTextColor    target, color (Text, Field or FieldHeading)
+          setFillColor    target, color (Box only)
+          setLineColor    target, color (Line or Box)
+          setSectionBackground  section, color (any section)
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
         availableFields (from read_report) - it can only reference fields already in the
         report's data source, and cannot add tables or change any connection.
+        "color" is "#RRGGBB", e.g. "#1F2A37" - always six hex digits with the leading "#".
+        setSectionBackground is how you get a full-width dark banner band across the page (e.g.
+        a report header or group header rendered as a coloured bar) - set the section's
+        background colour directly rather than drawing a Box over it, which would only cover
+        part of the section width the box itself occupies and would still show the report's
+        page background around it.
         removeObject permanently removes the object from the generated report - any kind,
         including a Field (which deletes that bound data from the output) or a Subreport, Chart
         or Crosstab. The source .rpt is never modified; every apply writes a new file, so this is

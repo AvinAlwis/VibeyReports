@@ -698,10 +698,169 @@ public class LayoutPlanValidatorTests
     }
 
     [Fact]
-    public void LayoutActionsAll_HasTwelveEntriesIncludingRemoveObject()
+    public void LayoutActionsAll_HasSixteenEntriesIncludingTheColourActions()
     {
-        LayoutActions.All.Should().HaveCount(12);
+        LayoutActions.All.Should().HaveCount(16);
         LayoutActions.All.Should().Contain(LayoutActions.RemoveObject);
+        LayoutActions.All.Should().Contain(LayoutActions.SetTextColor);
+        LayoutActions.All.Should().Contain(LayoutActions.SetFillColor);
+        LayoutActions.All.Should().Contain(LayoutActions.SetLineColor);
+        LayoutActions.All.Should().Contain(LayoutActions.SetSectionBackground);
+    }
+
+    // --- colour operations ---
+
+    [Fact]
+    public void Validate_AcceptsSetTextColorOnAFontableObject()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "Title", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetTextColorOnAFieldHeadingObject()
+    {
+        // Reuses IsFontable, which already includes FieldHeading.
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "StageNameHeading", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetTextColorOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "HeaderRule", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("HeaderRule");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetFillColorOnAText()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "Title", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("Box");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetLineColorOnAField()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "CustomerName", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("Line or Box");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetLineColorOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "HeaderRule", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetSectionBackgroundOnAnExistingSection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = "Section1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetSectionBackgroundOnAnUnknownSection()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = "SectionZ", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("SectionZ");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("1F2A37")]
+    [InlineData("#1F2A3")]
+    [InlineData("#1F2A377")]
+    [InlineData("#GGGGGG")]
+    [InlineData("red")]
+    public void Validate_RejectsMalformedColorWithAMessageShowingTheExpectedForm(string? color)
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "Title", Color = color });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("#RRGGBB");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddBoxThenSetFillColorOnTheNewBoxInTheSamePlan()
+    {
+        // Kind checks must use the SIMULATED kind: a box added earlier in this same plan must be
+        // a valid target for setFillColor even though it doesn't exist in the original schema.
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddBox, Section = "Section1", NewName = "NewBox1",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 100
+            },
+            new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "NewBox1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddLineThenSetLineColorOnTheNewLineInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddLine, Section = "Section1", NewName = "NewLine1",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 0
+            },
+            new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "NewLine1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTextThenSetTextColorOnTheNewTextInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "NewText1", Text = "hi",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 100, HeightTwips = 50
+            },
+            new LayoutOperation { Action = LayoutActions.SetTextColor, Target = "NewText1", Color = "#1F2A37" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
     }
 }
 

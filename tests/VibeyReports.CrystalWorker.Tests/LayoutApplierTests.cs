@@ -904,4 +904,104 @@ public class LayoutApplierTests
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
+
+    // --- colour operations ---
+
+    /// <summary>
+    /// setTextColor writes FontColor.Color; ReportReader.ToHex reads it back through the same
+    /// ColorRef helper, so this is the round-trip that proves the write and read halves agree
+    /// with each other (independent of whether the COLORREF channel-order hypothesis itself is
+    /// right -- that is what the swatch report settles).
+    /// </summary>
+    [Fact]
+    public void Apply_SetsTextColorAndItSurvivesSaveAndReopen()
+    {
+        var name = FirstTextOrFieldName();
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.SetTextColor, Target = name, Color = "#1F2A37" } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == name)
+                  .TextColorHex.Should().Be("#1F2A37");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsSectionBackgroundAndItSurvivesSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First().Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.SetSectionBackground, Section = sectionName, Color = "#1F2A37" } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.Single(s => s.Name == sectionName).BackgroundColorHex.Should().Be("#1F2A37");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsBoxFillAndLineColorAndBothSurviveSaveAndReopen()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddBox, Section = sectionName, NewName = "VibeyColourBox",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 340 },
+                new LayoutOperation { Action = LayoutActions.SetFillColor, Target = "VibeyColourBox", Color = "#00AA00" },
+                new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "VibeyColourBox", Color = "#0000FF" }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var box = schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == "VibeyColourBox");
+            box.FillColorHex.Should().Be("#00AA00");
+            box.LineColorHex.Should().Be("#0000FF");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsLineColorOnALine()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName, NewName = "VibeyColourRule",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 0 },
+                new LayoutOperation { Action = LayoutActions.SetLineColor, Target = "VibeyColourRule", Color = "#FF0000" }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sections.SelectMany(s => s.Objects).Single(o => o.Name == "VibeyColourRule")
+                  .LineColorHex.Should().Be("#FF0000");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
 }

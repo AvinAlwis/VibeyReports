@@ -35,6 +35,25 @@ public class ReportToolsTests
         schema.AvailableFields.Should().OnlyContain(f => !string.IsNullOrWhiteSpace(f.FormulaForm));
     }
 
+    /// <summary>
+    /// The colour-reading half of the task, at the MCP boundary: read_report's JSON must expose
+    /// textColorHex (FontColor.Color defaults to 0/black the moment a Text or Field object
+    /// exists, so this is a real non-null value on every fixture, not a coincidence of a schema
+    /// property merely existing).
+    /// </summary>
+    [Fact]
+    public async Task ReadReport_JsonIncludesTextColorHex()
+    {
+        var json = await Tools().ReadReport(Fixtures.SampleReport, CancellationToken.None);
+
+        var schema = JsonSerializer.Deserialize<ReportSchema>(json, VibeyJson.Options)!;
+        var textish = schema.Sections.SelectMany(s => s.Objects).Where(o => o.Kind is "Text" or "Field").ToList();
+
+        textish.Should().NotBeEmpty();
+        textish.Should().OnlyContain(o => o.TextColorHex == "#000000");
+        json.Should().Contain("textColorHex");
+    }
+
     [Fact]
     public async Task ReadReport_ReturnsAReadableErrorForAMissingFile()
     {
