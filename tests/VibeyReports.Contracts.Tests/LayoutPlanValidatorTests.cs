@@ -1130,18 +1130,11 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
     }
 
-    [Fact]
-    public void LayoutActionsAll_HasEighteenEntriesIncludingSubreportActions()
-    {
-        LayoutActions.All.Should().HaveCount(18);
-        LayoutActions.All.Should().Contain(LayoutActions.RemoveObject);
-        LayoutActions.All.Should().Contain(LayoutActions.SetTextColor);
-        LayoutActions.All.Should().Contain(LayoutActions.SetFillColor);
-        LayoutActions.All.Should().Contain(LayoutActions.SetLineColor);
-        LayoutActions.All.Should().Contain(LayoutActions.SetSectionBackground);
-        LayoutActions.All.Should().Contain(LayoutActions.AddSubreport);
-        LayoutActions.All.Should().Contain(LayoutActions.SetSubreportLink);
-    }
+    // The contents of LayoutActions.All are asserted exhaustively by
+    // LayoutPlanTests.LayoutActions_All_ContainsEverySupportedActionAndNothingElse, which compares
+    // against the complete set. A second, weaker copy used to live here, asserting a hardcoded
+    // count plus a hand-picked subset. It went red on every addition without ever catching
+    // anything the exhaustive test would have missed, so it was deleted rather than renumbered.
 
     // --- colour operations ---
 
