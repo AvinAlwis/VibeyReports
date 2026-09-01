@@ -17,3 +17,6 @@ packages/
 
 # Test run artifacts (hang dumps are hundreds of MB)
 TestResults/
+
+# Generated report artifacts (regenerate with out/scripts/)
+out/
