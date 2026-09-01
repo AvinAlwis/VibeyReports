@@ -177,9 +177,12 @@ $y = $y + 2400
 # at an unlaid-out shell embeds five default-height empty sections, which is what
 # made the logo overflow down across the Employee Details panel. The laid-out
 # version collapses every section except Details and holds only the blob field.
+# Inset from the page edge: at leftTwips=0 the sub-report's own border sits on the
+# printable boundary and the left edge is clipped. 150 matches the left inset used
+# by the text inside every panel below.
 Op @{ action='addSubreport'; section=$SEC; newName='CompanyLogo';
       reportPath='D:/VibeyReports/out/reports/PMSV10_IndDetEval_Logo.rpt'
-      leftTwips=0; topTwips=40; widthTwips=1600; heightTwips=700 }
+      leftTwips=150; topTwips=100; widthTwips=1600; heightTwips=700 }
 
 $p1h = $y + 150
 
