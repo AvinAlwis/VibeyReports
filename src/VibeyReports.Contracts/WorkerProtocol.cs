@@ -29,6 +29,8 @@ public sealed class WorkerResponse
 
     public ReportSchema? Schema { get; set; }
     public int? OperationsApplied { get; set; }
+    /// <summary>Names of objects deleted by a "removeObject" operation in the applied plan, set by "apply".</summary>
+    public List<string>? RemovedObjects { get; set; }
     public string? OutputPath { get; set; }
     /// <summary>Base64-encoded PDF, set by "render".</summary>
     public string? PdfBase64 { get; set; }

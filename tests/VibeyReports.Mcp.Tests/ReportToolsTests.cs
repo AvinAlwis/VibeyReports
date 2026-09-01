@@ -67,6 +67,39 @@ public class ReportToolsTests
         finally { if (File.Exists(dest)) File.Delete(dest); }
     }
 
+    /// <summary>
+    /// removeObject's reporting half at the MCP boundary: apply_layout's returned JSON must
+    /// surface removedObjects, not just operationsApplied, so an agent can see what it destroyed.
+    /// </summary>
+    [Fact]
+    public async Task ApplyLayout_WithARemoveObjectOperation_ReturnsRemovedObjectsInTheJson()
+    {
+        var schemaJson = await Tools().ReadReport(Fixtures.SampleReport, CancellationToken.None);
+        var schema = JsonSerializer.Deserialize<ReportSchema>(schemaJson, VibeyJson.Options)!;
+        var target = schema.Sections.SelectMany(s => s.Objects).First(o => o.Kind is "Text" or "Field");
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        var planJson = JsonSerializer.Serialize(new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = target.Name } }
+        }, VibeyJson.Options);
+
+        try
+        {
+            var result = await Tools().ApplyLayout(Fixtures.SampleReport, dest, planJson, false, CancellationToken.None);
+
+            result.Should().Contain("\"ok\": true");
+            result.Should().Contain("removedObjects");
+
+            using var doc = JsonDocument.Parse(result);
+            var removed = doc.RootElement.GetProperty("removedObjects");
+            removed.ValueKind.Should().Be(JsonValueKind.Array);
+            removed.GetArrayLength().Should().Be(1);
+            removed[0].GetString().Should().Be(target.Name);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
     [Fact]
     public async Task ApplyLayout_ReturnsValidationErrorsForABadPlanAndWritesNothing()
     {

@@ -615,6 +615,94 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeFalse();
         result.Errors[0].Message.Should().Contain("not a field in this report");
     }
+
+    // --- removeObject ---
+
+    [Fact]
+    public void Validate_RejectsRemoveObjectWithNoTarget()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("target");
+    }
+
+    [Fact]
+    public void Validate_RejectsRemoveObjectTargetingAnObjectThatDoesNotExist()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "NoSuchObject" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors[0].Message.Should().Contain("NoSuchObject");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAValidRemoveObject()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAMoveTargetingAnObjectRemovedEarlierInThePlanAndSaysSo()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" },
+            new LayoutOperation { Action = LayoutActions.Move, Target = "Title", LeftTwips = 10, TopTwips = 10 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle();
+        result.Errors[0].OperationIndex.Should().Be(1);
+        result.Errors[0].Message.Should().Contain("Title");
+        result.Errors[0].Message.Should().Contain("removed earlier in this plan",
+            because: "the message must make clear Title was removed by this plan, not that it never existed");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddTextReusingTheNameOfAnObjectRemovedEarlierInThePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "Title" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "Section1", NewName = "Title", Text = "New Title",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsResizeSectionShrinkAfterRemovingTheOnlyObjectThatWouldHaveBlockedIt()
+    {
+        // CustomerName ends at Top(20) + Height(300) = 320, so shrinking Section3 (currently 400)
+        // to anything below 320 would normally be rejected -- unless the object is gone first.
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "CustomerName" },
+            new LayoutOperation { Action = LayoutActions.ResizeSection, Section = "Section3", HeightTwips = 100 });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void LayoutActionsAll_HasTwelveEntriesIncludingRemoveObject()
+    {
+        LayoutActions.All.Should().HaveCount(12);
+        LayoutActions.All.Should().Contain(LayoutActions.RemoveObject);
+    }
 }
 
 internal static class PlanExtensions

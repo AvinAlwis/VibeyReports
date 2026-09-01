@@ -62,11 +62,18 @@ public sealed class ReportTools
           addField        section, newName, fieldRef, leftTwips, topTwips, widthTwips,
                           heightTwips
           resizeSection   section, heightTwips
+          removeObject    target
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
         availableFields (from read_report) - it can only reference fields already in the
         report's data source, and cannot add tables or change any connection.
+        removeObject permanently removes the object from the generated report - any kind,
+        including a Field (which deletes that bound data from the output) or a Subreport, Chart
+        or Crosstab. The source .rpt is never modified; every apply writes a new file, so this is
+        safe to use freely. Removals are listed in the response under "removedObjects" so you can
+        see exactly what was deleted. Section removal is not supported - resizeSection to 0 covers
+        collapsing a section instead.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.
@@ -109,6 +116,7 @@ public sealed class ReportTools
         {
             ok = true,
             operationsApplied = response.OperationsApplied,
+            removedObjects = response.RemovedObjects,
             outputPath = response.OutputPath,
             schema = response.Schema
         }, VibeyJson.Options);

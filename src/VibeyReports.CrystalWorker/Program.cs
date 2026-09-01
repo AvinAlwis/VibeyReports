@@ -82,14 +82,14 @@ namespace VibeyReports.CrystalWorker
 
                     using (var session = CrystalSession.Open(request.ReportPath))
                     {
-                        int applied;
+                        LayoutApplier.ApplyResult applyResult;
                         try
                         {
                             // The ONLY entry point into LayoutApplier. Apply validates the plan
                             // against the report's current schema before it mutates anything; the
                             // internal ApplyOperationsWithoutValidation seam that skips validation
                             // is never called here (task-8-supplement.md C3).
-                            applied = LayoutApplier.Apply(session, request.Plan);
+                            applyResult = LayoutApplier.Apply(session, request.Plan);
                         }
                         catch (LayoutApplier.InvalidPlanException ex)
                         {
@@ -114,7 +114,8 @@ namespace VibeyReports.CrystalWorker
                         session.SaveAs(request.OutputPath, request.Overwrite);
 
                         var response = WorkerResponse.Success();
-                        response.OperationsApplied = applied;
+                        response.OperationsApplied = applyResult.OperationsApplied;
+                        response.RemovedObjects = applyResult.RemovedObjects;
                         response.OutputPath = Path.GetFullPath(request.OutputPath);
                         // Final review F4: schema.ReportPath was ReportReader.Read's session.SourcePath
                         // (the SOURCE .rpt), even though apply_layout's own description warns at length

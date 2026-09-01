@@ -14,3 +14,6 @@ dist/
 # NuGet
 packages/
 *.nupkg
+
+# Test run artifacts (hang dumps are hundreds of MB)
+TestResults/

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -18,6 +19,18 @@ namespace VibeyReports.CrystalWorker
 {
     public static class LayoutApplier
     {
+        /// <summary>
+        /// What <see cref="Apply"/> did, so removals travel back to the caller alongside the
+        /// count. An AI agent driving apply_layout needs to see exactly which named objects it
+        /// just destroyed -- OperationsApplied alone cannot distinguish "moved 3 things" from
+        /// "removed 3 things", and a removeObject deletes data from the report permanently.
+        /// </summary>
+        public sealed class ApplyResult
+        {
+            public int OperationsApplied { get; set; }
+            public List<string> RemovedObjects { get; set; } = new List<string>();
+        }
+
         public sealed class InvalidPlanException : Exception
         {
             public InvalidPlanException(ValidationResult result)
@@ -34,7 +47,7 @@ namespace VibeyReports.CrystalWorker
         /// Validates the plan against the report's current layout, then applies every operation.
         /// Throws <see cref="InvalidPlanException"/> before touching the report if validation fails.
         /// </summary>
-        public static int Apply(CrystalSession session, LayoutPlan plan)
+        public static ApplyResult Apply(CrystalSession session, LayoutPlan plan)
         {
             if (session == null) throw new ArgumentNullException(nameof(session));
             if (plan == null) throw new ArgumentNullException(nameof(plan));
@@ -54,10 +67,10 @@ namespace VibeyReports.CrystalWorker
         /// internal method directly with a plan that Validate would now reject. Production code must
         /// always go through <see cref="Apply"/>.
         /// </summary>
-        internal static int ApplyOperationsWithoutValidation(CrystalSession session, LayoutPlan plan)
+        internal static ApplyResult ApplyOperationsWithoutValidation(CrystalSession session, LayoutPlan plan)
         {
             var doc = session.Document;
-            var applied = 0;
+            var result = new ApplyResult();
 
             foreach (var op in plan.Operations)
             {
@@ -124,6 +137,11 @@ namespace VibeyReports.CrystalWorker
                             AddField(doc, op);
                             break;
 
+                        case LayoutActions.RemoveObject:
+                            RemoveObject(doc, op.Target);
+                            result.RemovedObjects.Add(op.Target!);
+                            break;
+
                         default:
                             throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
                     }
@@ -136,10 +154,10 @@ namespace VibeyReports.CrystalWorker
                     throw;
                 }
 
-                applied++;
+                result.OperationsApplied++;
             }
 
-            return applied;
+            return result;
         }
 
         // --- object mutation -------------------------------------------------
@@ -211,6 +229,31 @@ namespace VibeyReports.CrystalWorker
                     box.Right = box.Left + box.Width;
                     box.Bottom = box.Top + box.Height;
                     break;
+            }
+        }
+
+        /// <summary>
+        /// Deletes a report object outright. Unlike Move/Resize/SetFont (clone-mutate-Modify),
+        /// there is no clone here -- ISCRReportObjectController.Remove takes the live object
+        /// directly (verified by reflection against the installed 11.5 assemblies). Any object
+        /// kind may be removed, including Field/Subreport/Chart/Crosstab; removing a Field
+        /// deletes data from the generated report, which is accepted by design (the source .rpt
+        /// is never touched). Wrapped the same way AddReportObject/AddField wrap Add: a
+        /// validator-legal removeObject can still be rejected by RAS itself, and an unwrapped
+        /// COMException would reach the caller with no indication of which object or action
+        /// caused it.
+        /// </summary>
+        private static void RemoveObject(ISCDReportClientDocument doc, string objectName)
+        {
+            var existing = FindObject(doc, objectName);
+            try
+            {
+                doc.ReportDefController.ReportObjectController.Remove(existing);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"removeObject\" for \"{objectName}\": {ex.Message.Trim()}", ex);
             }
         }
 

@@ -41,6 +41,32 @@ public class LayoutApplierTests
         return ReportReader.Read(reopened);
     }
 
+    /// <summary>
+    /// Same shape as <see cref="ApplyAndReread"/> (including the never-touch-the-source assertion)
+    /// but also hands back the <see cref="LayoutApplier.ApplyResult"/> itself, needed by the
+    /// removeObject tests to assert on RemovedObjects rather than only the resulting schema.
+    /// </summary>
+    private static ReportSchema ApplyAndRereadWithResult(
+        LayoutPlan plan, out LayoutApplier.ApplyResult result, out string savedPath, string sourcePath = null)
+    {
+        sourcePath = sourcePath ?? Fixtures.SampleReport;
+        var sourceBefore = File.ReadAllBytes(sourcePath);
+
+        var dest = TempRpt();
+        using (var session = CrystalSession.Open(sourcePath))
+        {
+            result = LayoutApplier.Apply(session, plan);
+            session.SaveAs(dest, overwrite: false);
+        }
+
+        File.ReadAllBytes(sourcePath).Should().Equal(sourceBefore,
+            because: "the source report must never be modified");
+
+        savedPath = dest;
+        using var reopened = CrystalSession.Open(dest);
+        return ReportReader.Read(reopened);
+    }
+
     private static string FirstTextOrFieldName()
     {
         using var session = CrystalSession.Open(Fixtures.SampleReport);
@@ -308,7 +334,7 @@ public class LayoutApplierTests
 
         using var session = CrystalSession.Open(Fixtures.SampleReport);
 
-        LayoutApplier.Apply(session, plan).Should().Be(2);
+        LayoutApplier.Apply(session, plan).OperationsApplied.Should().Be(2);
     }
 
     [Fact]
@@ -816,6 +842,65 @@ public class LayoutApplierTests
             added!.FontName.Should().Be("Segoe UI",
                 because: "it should inherit the font already used by PageHeaderSection1's existing " +
                          "Text objects rather than default to Arial");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    // --- removeObject ---
+
+    /// <summary>
+    /// Removes a real object from a fixture, saves, reopens, and confirms it is gone from the
+    /// returned schema while every other object survives -- the core removeObject contract, and
+    /// the reason ApplyAndRereadWithResult still runs the source-byte-identical check every other
+    /// test in this file relies on.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesAnObjectAndItIsAbsentAfterReopenWhileOthersSurvive()
+    {
+        List<string> namesBefore;
+        string toRemove;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+        {
+            var before = ReportReader.Read(s);
+            namesBefore = before.Sections.SelectMany(x => x.Objects).Select(o => o.Name).ToList();
+            toRemove = before.Sections.SelectMany(x => x.Objects).First(o => o.Kind == "Text" || o.Kind == "Field").Name;
+        }
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            var namesAfter = schema.Sections.SelectMany(s => s.Objects).Select(o => o.Name).ToList();
+            namesAfter.Should().NotContain(toRemove);
+            namesAfter.Should().BeEquivalentTo(namesBefore.Where(n => n != toRemove),
+                because: "every object other than the removed one must survive untouched");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The reporting half of the task: ApplyResult.RemovedObjects must name what was destroyed so
+    /// an AI agent (and the user) can see it, since OperationsApplied alone cannot distinguish a
+    /// removal from any other kind of operation.
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsTheRemovedObjectNameInApplyResult()
+    {
+        var toRemove = FirstTextOrFieldName();
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
+        };
+
+        ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(1);
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove);
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }

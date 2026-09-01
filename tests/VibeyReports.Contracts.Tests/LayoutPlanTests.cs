@@ -64,12 +64,12 @@ public class LayoutPlanTests
     }
 
     [Fact]
-    public void LayoutActions_All_ContainsExactlyTheElevenMvpActions()
+    public void LayoutActions_All_ContainsExactlyTheTwelveActions()
     {
         LayoutActions.All.Should().BeEquivalentTo(new[]
         {
             "move", "resize", "setFont", "setFontSize", "setBold",
-            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField"
+            "setAlignment", "addText", "addLine", "addBox", "resizeSection", "addField", "removeObject"
         });
     }
 }

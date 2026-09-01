@@ -62,6 +62,13 @@ public static class LayoutPlanValidator
                     Width = o.WidthTwips, Height = o.HeightTwips, Kind = o.Kind
                 };
 
+        // removeObject tracking: names removed earlier in this plan give a specific "removed by
+        // this plan" message instead of the generic "does not exist" one a target that never
+        // existed gets. A name is cleared from this set the moment it is reused by a later
+        // addText/addLine/addBox/addField, so removeObject X followed by addText newName=X stays
+        // reusable, and a *second* removeObject X after that re-add reports correctly again.
+        var removedByPlan = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var printableWidth = schema.Page.WidthTwips - schema.Page.MarginLeftTwips - schema.Page.MarginRightTwips;
         var printableHeight = schema.Page.HeightTwips - schema.Page.MarginTopTwips - schema.Page.MarginBottomTwips;
 
@@ -82,7 +89,7 @@ public static class LayoutPlanValidator
                 continue;
             }
 
-            var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight, availableFieldRefs);
+            var errors = ValidateOne(op, i, objects, sectionHeights, printableWidth, printableHeight, availableFieldRefs, removedByPlan);
             result.Errors.AddRange(errors);
         }
 
@@ -95,7 +102,8 @@ public static class LayoutPlanValidator
         Dictionary<string, SimObject> objects,
         Dictionary<string, int> sectionHeights,
         int printableWidth, int printableHeight,
-        HashSet<string> availableFieldRefs)
+        HashSet<string> availableFieldRefs,
+        HashSet<string> removedByPlan)
     {
         var errs = new List<ValidationError>();
         void Err(string m) => errs.Add(new ValidationError { OperationIndex = index, Message = m });
@@ -108,7 +116,8 @@ public static class LayoutPlanValidator
         }
 
         var needsTarget = action is LayoutActions.Move or LayoutActions.Resize or LayoutActions.SetFont
-            or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment;
+            or LayoutActions.SetFontSize or LayoutActions.SetBold or LayoutActions.SetAlignment
+            or LayoutActions.RemoveObject;
         var needsSection = action is LayoutActions.AddText or LayoutActions.AddLine
             or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField;
 
@@ -118,7 +127,9 @@ public static class LayoutPlanValidator
             if (string.IsNullOrWhiteSpace(op.Target)) { Err($"\"{action}\" requires \"target\"."); return errs; }
             if (!objects.TryGetValue(op.Target!, out target))
             {
-                Err($"Object \"{op.Target}\" does not exist in the report.");
+                Err(removedByPlan.Contains(op.Target!)
+                    ? $"Object \"{op.Target}\" was removed earlier in this plan."
+                    : $"Object \"{op.Target}\" does not exist in the report.");
                 return errs;
             }
         }
@@ -271,13 +282,27 @@ public static class LayoutPlanValidator
                     Err($"\"{op.NewName}\" would end at {bottom}, past the height of section \"{op.Section}\" ({sectionHeights[op.Section!]}).");
 
                 if (errs.Count == 0)
+                {
                     objects[op.NewName!] = new SimObject
                     {
                         Section = op.Section!, Left = l, Top = t, Width = w, Height = h,
                         Kind = KindForAdd(action)
                     };
+                    // The name is live again: a later removeObject on it must not report "was
+                    // removed earlier in this plan" about the object that no longer exists.
+                    removedByPlan.Remove(op.NewName!);
+                }
                 break;
             }
+
+            case LayoutActions.RemoveObject:
+                // Target existence/removed-earlier was already checked by the shared needsTarget
+                // block above. Deleting the entry frees the name for a later addText/addLine/
+                // addBox/addField, and drops it from any section-height shrink check that runs
+                // afterwards since that check only walks what remains in `objects`.
+                objects.Remove(op.Target!);
+                removedByPlan.Add(op.Target!);
+                break;
 
             case LayoutActions.ResizeSection:
             {

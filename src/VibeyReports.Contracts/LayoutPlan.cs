@@ -15,11 +15,12 @@ public static class LayoutActions
     public const string AddBox = "addBox";
     public const string ResizeSection = "resizeSection";
     public const string AddField = "addField";
+    public const string RemoveObject = "removeObject";
 
     public static readonly string[] All =
     {
         Move, Resize, SetFont, SetFontSize, SetBold,
-        SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField
+        SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject
     };
 }
 
@@ -37,7 +38,7 @@ public sealed class LayoutOperation
 {
     public string Action { get; set; } = "";
 
-    /// <summary>Existing object name. Required for move/resize/setFont/setFontSize/setBold/setAlignment.</summary>
+    /// <summary>Existing object name. Required for move/resize/setFont/setFontSize/setBold/setAlignment/removeObject.</summary>
     public string? Target { get; set; }
 
     /// <summary>Section name. Required for addText/addLine/addBox/resizeSection/addField.</summary>

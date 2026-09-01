@@ -299,4 +299,39 @@ public class ProgramEndToEndTests
         }
         finally { if (File.Exists(dest)) File.Delete(dest); }
     }
+
+    /// <summary>
+    /// End-to-end coverage of the twelfth operation through the real worker process: an apply
+    /// containing a removeObject returns ok:true with removedObjects populated in the JSON
+    /// response, not just OperationsApplied incremented.
+    /// </summary>
+    [Fact]
+    public void Apply_WithARemoveObjectOperation_ReturnsOkTrueWithRemovedObjectsPopulated()
+    {
+        var readResponse = Run(new WorkerRequest { Command = WorkerCommands.Read, ReportPath = Fixtures.SampleReport });
+        var toRemove = readResponse.Schema!.Sections
+            .SelectMany(s => s.Objects)
+            .First(o => o.Kind == "Text" || o.Kind == "Field").Name;
+
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var response = Run(new WorkerRequest
+            {
+                Command = WorkerCommands.Apply,
+                ReportPath = Fixtures.SampleReport,
+                OutputPath = dest,
+                Plan = new LayoutPlan
+                {
+                    Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
+                }
+            });
+
+            response.Ok.Should().BeTrue(because: response.Error);
+            response.RemovedObjects.Should().NotBeNull();
+            response.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove);
+            response.Schema!.Sections.SelectMany(s => s.Objects).Should().NotContain(o => o.Name == toRemove);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
 }
