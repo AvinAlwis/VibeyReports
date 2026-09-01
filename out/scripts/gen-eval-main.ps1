@@ -62,6 +62,10 @@ function Bx($n,$tp,$h) {
 # Dark banner with white caption. Counter is $bandSeq, NOT $bar: PowerShell
 # variable names are case-insensitive, so a $bar counter and a $BAR colour are
 # the same variable and the counter silently overwrites the colour.
+# Returns the y at which the band's CONTENT should start: the bar's bottom plus
+# $GAP, so every panel and sub-report sits slightly clear of its title bar rather
+# than butting straight up against it.
+$GAP = 120
 function Band($caption, $tp) {
   $script:bandSeq++
   $b = "Bar$script:bandSeq"; $c = "BarT$script:bandSeq"
@@ -69,13 +73,16 @@ function Band($caption, $tp) {
   Fill $b $BARCLR; Stroke $b $BARCLR
   Txt $c $caption 150 ($tp+95) 8000 220 9 $true
   Ink $c $BARTXT
-  return ($tp + 340)
+  return ($tp + 340 + $script:GAP)
 }
 
 # Sections must be grown BEFORE anything is placed in them: the validator checks
 # each add against the height simulated at that point in the plan.
-Op @{ action='resizeSection'; section=$P1; heightTwips=12600 }
-Op @{ action='resizeSection'; section=$P2; heightTwips=13100 }
+# Generous initial heights - just under the 16118 printable limit - so adding a
+# band or a gap later does not fail the plan. Both are trimmed to the exact used
+# height by the resizeSection pair at the end.
+Op @{ action='resizeSection'; section=$P1; heightTwips=15800 }
+Op @{ action='resizeSection'; section=$P2; heightTwips=15800 }
 Op @{ action='resizeSection'; section='PageHeaderSection1';   heightTwips=0 }
 Op @{ action='resizeSection'; section='PageFooterSection1';   heightTwips=0 }
 Op @{ action='resizeSection'; section='ReportFooterSection1'; heightTwips=0 }
@@ -136,6 +143,9 @@ $y = $y + 1500
 # combined figure. The goal rate is shown; confirm the intended combination.
 $y = Band 'OVERALL PERFORMANCE SUMMARY' ($y + 200)
 Bx 'TileBox' $y 1200
+# Black outline around the tile row, overriding the light border Bx applies. The
+# later setLineColor wins - colour operations are emitted in order.
+Stroke 'TileBox' '#000000'
 $tiles = @(
   @{ lbl='FINAL OVERALL RATING'; fld='final_rating_descriptor' },
   @{ lbl='FINAL OVERALL SCORE';  fld='overall_score' },
