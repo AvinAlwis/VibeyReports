@@ -83,10 +83,10 @@ public sealed class ReportTools
         page background around it.
         removeObject permanently removes the object from the generated report - any kind,
         including a Field (which deletes that bound data from the output) or a Subreport, Chart
-        or Crosstab. The source .rpt is never modified; every apply writes a new file, so this is
-        safe to use freely. Removals are listed in the response under "removedObjects" so you can
-        see exactly what was deleted. Section removal is not supported - resizeSection to 0 covers
-        collapsing a section instead.
+        or Crosstab. The source .rpt is never modified - every apply writes a new file - but the
+        removal is permanent in that new file. Removals are listed in the response under
+        "removedObjects" so you can see exactly what was deleted. Section removal is not
+        supported - resizeSection to 0 covers collapsing a section instead.
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.

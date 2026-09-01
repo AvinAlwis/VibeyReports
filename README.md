@@ -116,13 +116,18 @@ worker; a failed probe writes to stderr and exits 1.)
 ## Supported operations
 
 `move`, `resize`, `setFont`, `setFontSize`, `setBold`, `setAlignment`, `addText`, `addLine`,
-`addBox`, `resizeSection`, `addField`.
+`addBox`, `resizeSection`, `addField`, `removeObject`, `setTextColor`, `setFillColor`,
+`setLineColor`, `setSectionBackground`.
 
 Layout only. Database connections, SQL, formulas, parameters, record selection and grouping
 cannot be changed; `LayoutPlanValidator` rejects any attempt. `addField`'s `fieldRef` is the
 one operation with its own security boundary: it must exactly match a `formulaForm` already
 exposed by the report's own data source (see `ReportSchema.AvailableFields`) — it cannot be
-used to add new tables, formulas, or connections.
+used to add new tables, formulas, or connections. `removeObject` permanently removes an object
+from the generated report — including a bound field, which deletes that data from the
+output — though the source `.rpt` is never modified. The four colour operations
+(`setTextColor`, `setFillColor`, `setLineColor`, `setSectionBackground`) take a `color` of the
+form `#RRGGBB`.
 
 ## Tests
 

@@ -19,27 +19,12 @@ public class LayoutApplierTests
     /// source .rpt was never touched -- "the source must never be modified" is a global constraint,
     /// and every test in this file that goes through this helper mutates a session opened directly
     /// on one of the fixtures under tests/fixtures (Fixtures.SampleReport by default, or another
-    /// fixture passed via sourcePath), so checking it here covers all of them for free.
+    /// fixture passed via sourcePath), so checking it here covers all of them for free. Delegates
+    /// to <see cref="ApplyAndRereadWithResult"/> so the never-touch-the-source assertion lives in
+    /// exactly one place and cannot drift between the two helpers.
     /// </summary>
     private static ReportSchema ApplyAndReread(LayoutPlan plan, out string savedPath, string sourcePath = null)
-    {
-        sourcePath = sourcePath ?? Fixtures.SampleReport;
-        var sourceBefore = File.ReadAllBytes(sourcePath);
-
-        var dest = TempRpt();
-        using (var session = CrystalSession.Open(sourcePath))
-        {
-            LayoutApplier.Apply(session, plan);
-            session.SaveAs(dest, overwrite: false);
-        }
-
-        File.ReadAllBytes(sourcePath).Should().Equal(sourceBefore,
-            because: "the source report must never be modified");
-
-        savedPath = dest;
-        using var reopened = CrystalSession.Open(dest);
-        return ReportReader.Read(reopened);
-    }
+        => ApplyAndRereadWithResult(plan, out _, out savedPath, sourcePath);
 
     /// <summary>
     /// Same shape as <see cref="ApplyAndReread"/> (including the never-touch-the-source assertion)
@@ -75,6 +60,23 @@ public class LayoutApplierTests
             .SelectMany(s => s.Objects)
             .First(o => o.Kind == "Text" || o.Kind == "Field")
             .Name;
+    }
+
+    /// <summary>
+    /// Up to <paramref name="count"/> distinct Text/Field object names from SampleReport.rpt, for
+    /// tests that need several independent targets in one plan (e.g. a mixed removeObject plan).
+    /// </summary>
+    private static List<string> DistinctTextOrFieldNames(int count)
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var schema = ReportReader.Read(session);
+        return schema.Sections
+            .SelectMany(s => s.Objects)
+            .Where(o => o.Kind == "Text" || o.Kind == "Field")
+            .Select(o => o.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(count)
+            .ToList();
     }
 
     /// <summary>
@@ -871,7 +873,7 @@ public class LayoutApplierTests
             Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = toRemove } }
         };
 
-        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        var schema = ApplyAndRereadWithResult(plan, out _, out var saved);
         try
         {
             var namesAfter = schema.Sections.SelectMany(s => s.Objects).Select(o => o.Name).ToList();
@@ -901,6 +903,115 @@ public class LayoutApplierTests
         {
             result.OperationsApplied.Should().Be(1);
             result.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F1: every other removeObject test uses a single-operation plan, so a regression
+    /// that reports every operation's target as removed (not just removeObject's) would still
+    /// pass them all -- e.g. moving `result.RemovedObjects.Add(op.Target!)` out of the switch's
+    /// RemoveObject case and below the whole switch. A plan with a non-removal operation plus two
+    /// removals catches that: OperationsApplied must count all three, and RemovedObjects must be
+    /// exactly the two removed names, in order -- not the bold target, not duplicated, not just
+    /// the last one.
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsExactlyTheRemovedObjectsFromAMixedPlanInOrder()
+    {
+        var names = DistinctTextOrFieldNames(3);
+        names.Should().HaveCountGreaterThanOrEqualTo(3,
+            because: "this test needs three distinct Text/Field objects on SampleReport.rpt: one to " +
+                     "restyle and leave in place, two to remove");
+        var keep = names[0];
+        var removeFirst = names[1];
+        var removeSecond = names[2];
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.SetBold, Target = keep, Bold = true },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = removeFirst },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = removeSecond }
+            }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(3);
+            result.RemovedObjects.Should().Equal(
+                new List<string> { removeFirst, removeSecond },
+                because: "RemovedObjects must name exactly the two removed objects, in order -- " +
+                         "not the setBold target, which was only restyled");
+
+            var namesAfter = schema.Sections.SelectMany(s => s.Objects).Select(o => o.Name).ToList();
+            namesAfter.Should().Contain(keep, because: "the setBold target was never removed");
+            namesAfter.Should().NotContain(removeFirst);
+            namesAfter.Should().NotContain(removeSecond);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F5: FindObject matches OrdinalIgnoreCase, so a plan targeting a different casing
+    /// than the report's own object name must still report the report's canonical Name in
+    /// RemovedObjects, not the caller-supplied casing (AddField already does this for the same
+    /// reason).
+    /// </summary>
+    [Fact]
+    public void Apply_ReportsRemovedObjectUsingTheReportsCanonicalNameNotTheCallersCasing()
+    {
+        var toRemove = FirstTextOrFieldName();
+        var differentCasing = toRemove.ToUpperInvariant();
+        differentCasing.Should().NotBe(toRemove,
+            because: "the fixture's object name must contain a lowercase letter for this test to " +
+                     "actually exercise a casing mismatch");
+
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.RemoveObject, Target = differentCasing } }
+        };
+
+        ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be(toRemove,
+                because: "RemovedObjects must echo the report's canonical name, not the caller's casing");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Findings F2: the apply_layout description promises removeObject works on Field/Text plus
+    /// Subreport/Chart/Crosstab, but every other test here selects a Text or Field target. This
+    /// proves a third kind (Line) is genuinely accepted by RAS, and simultaneously exercises the
+    /// previously-untested "remove an object added earlier in the same plan" ordering case.
+    /// </summary>
+    [Fact]
+    public void Apply_RemovesALineAddedEarlierInTheSamePlan()
+    {
+        string sectionName;
+        using (var s = CrystalSession.Open(Fixtures.SampleReport))
+            sectionName = ReportReader.Read(s).Sections.First(x => x.HeightTwips >= 400).Name;
+
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddLine, Section = sectionName, NewName = "VibeyRemoveMeLine",
+                    LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 0 },
+                new LayoutOperation { Action = LayoutActions.RemoveObject, Target = "VibeyRemoveMeLine" }
+            }
+        };
+
+        var schema = ApplyAndRereadWithResult(plan, out var result, out var saved);
+        try
+        {
+            result.OperationsApplied.Should().Be(2);
+            result.RemovedObjects.Should().ContainSingle().Which.Should().Be("VibeyRemoveMeLine");
+            schema.Sections.SelectMany(s => s.Objects).Should().NotContain(o => o.Name == "VibeyRemoveMeLine");
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }

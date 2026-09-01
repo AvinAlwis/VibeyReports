@@ -311,9 +311,6 @@ public static class LayoutPlanValidator
                         Section = op.Section!, Left = l, Top = t, Width = w, Height = h,
                         Kind = KindForAdd(action)
                     };
-                    // The name is live again: a later removeObject on it must not report "was
-                    // removed earlier in this plan" about the object that no longer exists.
-                    removedByPlan.Remove(op.NewName!);
                 }
                 break;
             }

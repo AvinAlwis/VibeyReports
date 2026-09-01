@@ -138,8 +138,7 @@ namespace VibeyReports.CrystalWorker
                             break;
 
                         case LayoutActions.RemoveObject:
-                            RemoveObject(doc, op.Target);
-                            result.RemovedObjects.Add(op.Target!);
+                            result.RemovedObjects.Add(RemoveObject(doc, op.Target));
                             break;
 
                         case LayoutActions.SetTextColor:
@@ -293,9 +292,11 @@ namespace VibeyReports.CrystalWorker
         /// is never touched). Wrapped the same way AddReportObject/AddField wrap Add: a
         /// validator-legal removeObject can still be rejected by RAS itself, and an unwrapped
         /// COMException would reach the caller with no indication of which object or action
-        /// caused it.
+        /// caused it. Returns the object's canonical Name (not the caller-supplied objectName,
+        /// which FindObject matches case-insensitively) so RemovedObjects reports the report's
+        /// actual name rather than echoing whatever casing the caller used.
         /// </summary>
-        private static void RemoveObject(ISCDReportClientDocument doc, string objectName)
+        private static string RemoveObject(ISCDReportClientDocument doc, string objectName)
         {
             var existing = FindObject(doc, objectName);
             try
@@ -307,6 +308,8 @@ namespace VibeyReports.CrystalWorker
                 throw new InvalidOperationException(
                     $"Crystal rejected \"removeObject\" for \"{objectName}\": {ex.Message.Trim()}", ex);
             }
+
+            return existing.Name;
         }
 
         private static CrAlignmentEnum ParseAlignment(string alignment)
