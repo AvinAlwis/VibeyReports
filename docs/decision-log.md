@@ -902,3 +902,19 @@ does not tolerate the sharing. xUnit parallelises across collections by default.
 
 **Fix direction:** put the Crystal-touching collections in a single xUnit collection to serialise
 them, or give each test its own temp copy of the fixture.
+
+---
+
+## Licensing decision (2026-09-01, user)
+
+**FluentAssertions 8.9.0 is kept deliberately.** From v8 it is governed by the Xceed commercial
+licence: free for non-commercial use, paid subscription required for commercial use. The test run
+surfaces this as a warning on every suite.
+
+The user's call: this project is personal/non-commercial for now, so the community licence applies.
+**If Vibey Reports ever ships commercially, this must be revisited** — either downgrade to
+FluentAssertions 7.x (last Apache-2.0 release, near-identical API) or migrate to Shouldly / plain
+`Assert.*`.
+
+Note the same version is used by `D:\PHR-X-DB-MCP-SERVER` in both of its test projects, so any future
+change likely applies there too.
