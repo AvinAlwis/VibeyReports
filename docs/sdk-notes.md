@@ -305,3 +305,13 @@ Measured against `out/reports/PMSV10_GoalAlignCascade.subreport.rpt`:
 accept, and is worth resolving against before the call: it turns an unaddressable name into a
 message that lists what does exist, and canonicalises casing (COM is case-sensitive here; the
 validator is not).
+
+## Sub-report link field pairs are type-checked by Crystal (measured 2026-09-01)
+
+Linking a String main-report field to a Number sub-report field is refused at save time with COM
+"Invalid value type." Measured: `{...cascade;1.employee_name}` (String) to
+`{...detail;1.goal_id}` (Number) fails; `employee_name` to `goal_name` (String to String) succeeds.
+
+Note what this does NOT protect against: the check is on value *type*, not meaning. Linking
+`performance_cycle_id` to `goal_id` passes cleanly because both are Number, while being semantically
+nonsense. Type compatibility is not evidence that a link is correct.
