@@ -511,3 +511,24 @@ For the record, the full ladder of failure modes now measured for `addTable`:
 | `VIBEY_DB_PASSWORD` unset | Fails fast (~2s, no network) naming the variable |
 | Set to a wrong value | `Logon failed ... [Database Vendor Code: 18456]` -- SQL Server's "login failed", i.e. the credential reached the server and was refused there |
 | Set correctly | `ok: true`, table added with server-discovered fields |
+
+## The RAS SDK cannot re-verify a report's schema (measured 2026-09-01)
+
+When a stored procedure gains a column, an existing `.rpt` does NOT see it. The report carries a
+cached result-set schema, and nothing in the RAS SDK refreshes it:
+
+- The only Verify-style method on the whole surface is
+  `ISCRDatabaseController.VerifyTableConnectivity(Object)`, which tests that a table is *reachable*.
+  There is no equivalent of the Designer's **Database > Verify Database**.
+- Repointing a table at itself with `SetTableLocation` -- the usual trick -- **does not work**.
+  Measured: `setTableLocation` on `sp_perf_goal_align_cascade;1` returned `ok: true`, and the
+  reopened report still listed the original twelve fields with no sign of the newly added
+  `emp_number`.
+
+Consequence: after a procedure's result set changes, the report must be opened in the **Crystal
+Designer** and verified there before any operation can reference the new fields. Until then,
+`setSubreportLink` against a new column fails with COM "Invalid field name" -- which reads as a
+typo but is actually a stale schema.
+
+A sub-report embedded in a host report has its own cached schema, so it must be verified
+separately, from inside the sub-report, not just from the host.
