@@ -835,3 +835,70 @@ Task 11: complete (commits bd7b5d6..83968f2, review clean after 1 fix round)
     Cost if wrong: a rare failed overwrite loses the previous output; recoverable by re-running apply_layout.
 
 ## PROJECT COMPLETE — all 11 tasks + final review + one fix wave. Handing over.
+
+---
+
+## Post-merge findings (2026-09-01, during branch finalisation)
+
+Three issues surfaced while verifying the merged result. None is a regression from the merge —
+`git diff main feat/vibey-reports` was empty, i.e. the merged tree is byte-identical to the tree
+that passed 129/129 immediately beforehand.
+
+### PM1 — `read_report` can BLOCK (not fail) when the report's database is unreachable
+
+**Severity: Important. Product defect, not a test issue.**
+
+With the VPN down, `sgdev01db02.cloud` did not resolve and Crystal's OLE DB layer blocked
+indefinitely inside database field enumeration — zero CPU, waiting on a socket that would never
+answer. Two suites hung for 28+ minutes. Identified via `dotnet test --blame-hang`, which named
+`Read_SucceedsEvenWhenFieldEnumerationCannotReachTheDatabase` and
+`ExportPdf_ProducesAValidPdfForEveryRenderableFixture`.
+
+Task 5 carried an explicit requirement that *reading a report's layout must never require a live
+database connection*. The implementation honours that for **failure** — field enumeration is wrapped
+in a deliberate bare catch, so a connection *error* leaves `AvailableFields` empty and the read still
+succeeds. But a catch does nothing about a call that never returns. The requirement is therefore not
+truly met.
+
+Note the irony: the test named `..._CannotReachTheDatabase` was flagged during Task 5 as never
+actually exercising its catch branch, because no fixture triggered a failure. When the environment
+finally produced the real condition, the code did not behave as the requirement intended.
+
+In normal MCP use the blast radius is bounded — `CrystalWorkerClient` kills the worker after 3
+minutes — but three minutes of silence on what should be a fast read is poor, and one worker process
+is left blocked until then.
+
+**Fix direction:** bound the field-enumeration call in time, not just in exception type. Needs a
+design decision about where the bound belongs (worker-side wrapper vs. connection timeout on the
+Crystal side).
+
+### PM2 — `ReportRenderer`'s error message misattributes EVERY `COMException` to missing parameters
+
+**Severity: Important. Demonstrably misleading — it misled during this very investigation.**
+
+A genuine file-lock failure surfaced as:
+
+> Could not render "SampleReport.rpt" to PDF: The process cannot access the file because it is being
+> used by another process. **Reports that declare parameters with no saved values cannot be
+> previewed, because Vibey Reports does not supply parameter values.**
+
+The parameter explanation is unconditionally appended to any `COMException` from `Export`. It was
+added in Task 7 (supplement C2) specifically to make the *parameter* case actionable, and it does —
+but it now asserts a false cause for every other COM failure. This message reaches Claude through
+`preview_report`, so a wrong diagnosis actively misdirects the agent.
+
+**Fix direction:** only append the parameter explanation when the COM message actually indicates
+missing parameter values; otherwise pass the COM message through with the report name and no
+invented cause.
+
+### PM3 — the worker test suite is flaky under parallel execution
+
+**Severity: Minor (test-only).**
+
+`ExportPdf_ProducesAValidPdfForEveryRenderableFixture("SampleReport.rpt")` failed with *"The process
+cannot access the file because it is being used by another process"*, then passed 3/3 when run in
+isolation. Multiple test classes open the same fixture `.rpt` concurrently and Crystal's export path
+does not tolerate the sharing. xUnit parallelises across collections by default.
+
+**Fix direction:** put the Crystal-touching collections in a single xUnit collection to serialise
+them, or give each test its own temp copy of the fixture.
