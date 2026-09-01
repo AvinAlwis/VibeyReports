@@ -253,3 +253,25 @@ bytes actually round-tripped correctly, so that assertion was added
   against the installed SDK before its task was dispatched.
 - `docs/superpowers/plans/2026-08-31-vibey-reports.md` — the original plan. Predates all of the
   above; this file wins wherever they disagree.
+
+## setSubreportLink cannot feed a stored-procedure parameter (measured 2026-09-01)
+
+`SubreportLink.LinkedParameterName` does **not** round-trip. Written as `"performance_cycle_id"`,
+Crystal discards it and stores its own auto-generated parameter instead:
+
+```
+main  = {sp_perf_goal_align_cascade;1.performance_cycle_id}
+sub   = {sp_perf_goal_align_detail;1.goal_id}
+param = {?Pm-sp_perf_goal_align_cascade;1.performance_cycle_id}
+```
+
+`setSubreportLink` therefore expresses only a Crystal **field link** — main field to an existing
+sub-report *data field*, filtered through a `{?Pm-...}` parameter Crystal creates itself. It cannot
+target a stored procedure's declared parameter.
+
+Also measured: `SubreportFieldName` must name a real sub-report data field. Parameter-style forms
+(`{?x}`, `{?@x}`, `{?Pm-x}`, bare `@x`) are all rejected with COM "Invalid field name."
+
+**Consequence for parameter-driven sub-reports:** the sub-report's result set must *return* the
+column being linked on. If the procedure takes the value only as a parameter and does not select it
+back, no field link can be built and the Designer's Insert Subreport wizard is the fallback.
