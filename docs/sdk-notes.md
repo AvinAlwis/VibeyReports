@@ -485,3 +485,29 @@ it.
 `ISCRProcedure.Parameters` all read and write the report's own metadata and were exercised with the
 saved connection unusable. Only the two operations that must *verify a database object exists* go to
 the server.
+
+## addTable succeeds with VIBEY_DB_PASSWORD, and the password is not persisted (measured 2026-09-01)
+
+First successful `addTable` on this machine. With `VIBEY_DB_PASSWORD` set to the real password for
+`sgdev01db01_devlogin`, adding `sp_perf_goal_align_detail` to
+`out/reports/PMSV10_GoalAlignCascade.rpt` under the new alias `sp_perf_probe;1` returned `ok: true`.
+Reading the saved report back shows the alias present with **all five of its fields discovered from
+the server** -- so `Parameters` and `DataFields` do not need to be populated by the caller, which
+answers the question the earlier brief could not.
+
+This also closes the residual that was previously expectation rather than measurement:
+
+**The password does not appear in the saved `.rpt`.** The 74,752-byte output was scanned for the
+literal value in ASCII/Latin-1, UTF-16LE and UTF-8; no match in any of them. Crystal genuinely does
+not persist a connection password, so a report saved by an operation that supplied one is safe to
+commit.
+
+The source report was left byte-identical, as always.
+
+For the record, the full ladder of failure modes now measured for `addTable`:
+
+| State | Result |
+|---|---|
+| `VIBEY_DB_PASSWORD` unset | Fails fast (~2s, no network) naming the variable |
+| Set to a wrong value | `Logon failed ... [Database Vendor Code: 18456]` -- SQL Server's "login failed", i.e. the credential reached the server and was refused there |
+| Set correctly | `ok: true`, table added with server-discovered fields |
