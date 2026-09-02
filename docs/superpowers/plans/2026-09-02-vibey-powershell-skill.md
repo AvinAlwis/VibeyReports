@@ -818,14 +818,14 @@ function Apply-Ops($Ops, [string]$OutName) {
                          plan = @{ planVersion=1; operations=@($Ops) } }
     return @{ Result = $r; Output = $out }
 }
-function First-TextObject($Schema) {
-    foreach ($s in $Schema.sections) { foreach ($o in $s.objects) { if ($o.kind -eq 'Text') { return $o } } }
-    throw 'fixture has no Text object'
+function First-FontableObject($Schema) {
+    foreach ($s in $Schema.sections) { foreach ($o in $s.objects) { if ($o.kind -in 'Field','Text','FieldHeading') { return $o } } }
+    throw 'fixture has no fontable object'
 }
 
 It 'moves an object and the change survives a save and reopen' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
-    $t = First-TextObject $before
+    $t = First-FontableObject $before
     $a = Apply-Ops @{ action='move'; target=$t.name; leftTwips=($t.leftTwips + 120); topTwips=$t.topTwips } 'move.rpt'
     Should-Be $a.Result.ok $true 'ok'
     $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
@@ -836,7 +836,7 @@ It 'moves an object and the change survives a save and reopen' {
 It 'leaves the source report byte-identical' {
     $hashBefore = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
-    $t = First-TextObject $before
+    $t = First-FontableObject $before
     Apply-Ops @{ action='move'; target=$t.name; leftTwips=($t.leftTwips + 40); topTwips=$t.topTwips } 'src.rpt' | Out-Null
     Should-Be (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash $hashBefore 'source hash'
 }
@@ -852,7 +852,7 @@ It 'writes no output file when the plan fails validation' {
 
 It 'applies nothing at all when one operation in a plan is invalid' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
-    $t = First-TextObject $before
+    $t = First-FontableObject $before
     $out = Join-Path $scratch 'atomic.rpt'
     if (Test-Path $out) { Remove-Item $out -Force }
     $r = Invoke-Vibey @{ command='apply'; reportPath=$fixture; outputPath=$out; overwrite=$true
@@ -865,7 +865,7 @@ It 'applies nothing at all when one operation in a plan is invalid' {
 
 It 'sets a font size and it survives a save and reopen' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
-    $t = First-TextObject $before
+    $t = First-FontableObject $before
     $a = Apply-Ops @{ action='setFontSize'; target=$t.name; fontSizePt=14 } 'font.rpt'
     Should-Be $a.Result.ok $true 'ok'
     $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
@@ -1077,7 +1077,7 @@ It 'adds a horizontal line' {
 
 It 'adds a page number special field as a Field object' {
     $a = Apply-Ops @(
-        @{ action='resizeSection'; section='PageFooterSection1'; heightTwips=400 },
+        @{ action='resizeSection'; section='PageFooterSection1'; heightTwips=900 },
         @{ action='addSpecialField'; section='PageFooterSection1'; newName='VibeyPage'
            specialType='pageNOfM'; leftTwips=100; topTwips=80; widthTwips=2000; heightTwips=220 },
         @{ action='setFontSize'; target='VibeyPage'; fontSizePt=8 }) 'special.rpt'
@@ -1089,7 +1089,7 @@ It 'adds a page number special field as a Field object' {
 
 It 'removes an object and reports what it removed' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
-    $t = First-TextObject $before
+    $t = First-FontableObject $before
     $a = Apply-Ops @{ action='removeObject'; target=$t.name } 'remove.rpt'
     Should-Be $a.Result.ok $true 'ok'
     Should-Be $a.Result.removedObjects[0] $t.name 'removedObjects'
