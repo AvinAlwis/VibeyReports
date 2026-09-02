@@ -4,24 +4,27 @@
 # Input:  out/reports/_shell_overview.rpt  (blank, bound to sp_perf_detailed_eval_overview)
 # Output: out/reports/PMSV10_IndDetailedEval.rpt
 #
-# WHY TWO SECTIONS, NOT ONE
+# WHY TWO SECTIONS, AND WHY PAGE 1 IS A GROUP HEADER
 # A Crystal section cannot exceed one printable page (16118 twips on A4) and the
-# validator enforces it. The report is two pages of content (~25000 twips), so it
-# cannot live in one section. Page 1 goes in the Report Header, page 2 in Details.
+# validator enforces it. This report is two pages of content (~26000 twips), so it
+# cannot live in one section.
 #
-# Consequence worth knowing: the Report Header renders ONCE per report, so this
-# shape is right for "one report instance per selected employee" (which is how the
-# spec describes bulk generation, and the only shape for Self Service). It will NOT
-# repeat page 1 per employee if several employees are rendered into one file - that
-# needs a Group Header, which no Vibey Reports operation can create.
+# Page 1 lives in a GROUP HEADER on emp_number, not the Report Header. The Report
+# Header renders once for the whole report, so with several employees in one file
+# it would print the first employee's details above everybody's data. A group
+# header repeats per employee, which is the bulk-generation flow the spec
+# describes. Page 2 stays in Details, which repeats per row - and the overview
+# procedure returns exactly one row per employee, so the two stay in step.
 #
-# OTHER KNOWN GAPS, both needing the Designer (no operation exists):
-#   * No explicit page break; Crystal breaks when the Report Header is full.
-#   * No page-number field ("Page 1 of 2") - that is a Special Field.
+# Crystal names the sections a group creates, from the FIELD NAME with
+# non-alphanumerics stripped: emp_number -> empnumberHeaderSection1 /
+# empnumberFooterSection1. Measured, not guessed - the naming does not use the
+# group index, and keeping the underscore would be wrong.
 
 $SRC = 'sp_perf_detailed_eval_overview;1'
+$GRP = 'emp_number'                        # field the report groups on
 $W   = 11186
-$P1  = 'ReportHeaderSection1'      # page 1
+$P1  = 'empnumberHeaderSection1'   # page 1 - repeats per employee
 $P2  = 'DetailSection1'            # page 2
 
 $INK    = '#1F2937'
@@ -81,11 +84,16 @@ function Band($caption, $tp) {
 # Generous initial heights - just under the 16118 printable limit - so adding a
 # band or a gap later does not fail the plan. Both are trimmed to the exact used
 # height by the resizeSection pair at the end.
+# The group has to exist before its sections can be sized or filled.
+Op @{ action='addGroup'; fieldRef=("{" + $SRC + "." + $GRP + "}"); direction='ascending' }
+
 Op @{ action='resizeSection'; section=$P1; heightTwips=15800 }
 Op @{ action='resizeSection'; section=$P2; heightTwips=15800 }
+Op @{ action='resizeSection'; section='ReportHeaderSection1'; heightTwips=0 }
 Op @{ action='resizeSection'; section='PageHeaderSection1';   heightTwips=0 }
 Op @{ action='resizeSection'; section='PageFooterSection1';   heightTwips=420 }
 Op @{ action='resizeSection'; section='ReportFooterSection1'; heightTwips=0 }
+Op @{ action='resizeSection'; section='empnumberFooterSection1'; heightTwips=0 }
 
 # =============================== PAGE 1 =======================================
 $SEC = $P1
@@ -244,9 +252,14 @@ Ink 'PageNo' $MUTED
 Txt 'FtConf' 'CONFIDENTIAL - Performance Evaluation' 0 140 6000 220 8 $false
 Ink 'FtConf' $MUTED
 
-# Force the split between page 1 and page 2 rather than relying on the Report
-# Header simply filling up. Previously this was a manual Designer step.
-Op @{ action='setSectionBreak'; section=$P1; newPageAfter=$true }
+# Two breaks on the group header, doing two different jobs:
+#   newPageBefore - each employee starts on a fresh page
+#   newPageAfter  - page 1 and page 2 of one employee are separate pages
+# newPageBefore is used rather than a break after Details because a break after
+# the LAST row leaves a trailing blank page, and Crystal has no way to suppress
+# it without a conditional formula. Worth confirming in the Designer that the
+# FIRST group header does not produce a leading blank page.
+Op @{ action='setSectionBreak'; section=$P1; newPageBefore=$true; newPageAfter=$true }
 
 # The summary comment is free narrative text and clips at a fixed height.
 Op @{ action='setCanGrow'; target='ComVal'; canGrow=$true }
