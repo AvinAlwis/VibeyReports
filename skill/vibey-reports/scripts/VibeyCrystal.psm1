@@ -234,6 +234,27 @@ function Set-VibeyObject {
     $Doc.ReportDefController.ReportObjectController.Modify($Original, $Modified)
 }
 
+function New-VibeyDefaultFontColor {
+    <#
+        MEASURED: a freshly constructed FieldObjectClass comes back with FontColor == $null
+        (a freshly constructed TextObjectClass does not -- it already carries a non-null
+        FontColor/Font pair). A null FontColor makes the object unfontable: the existing
+        setFont/setFontSize/setBold arms dereference $clone.FontColor.Font, which throws on
+        $null. So a field this task adds (addField, addSpecialField) needs a FontColor
+        supplied up front, or a setFontSize in the very same plan (both Task-5 tests do
+        exactly this) would fail on an object this operation itself just created.
+        Size is written through Set-VibeyComProperty rather than dot notation, for the same
+        reason setFontSize already does -- see that function's comment for the measured
+        silent-no-op trap on this COM type.
+    #>
+    $fontColor = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.FontColorClass
+    $font = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.FontClass
+    $font.Name = 'Arial'
+    Set-VibeyComProperty -ComObject $font -Name 'Size' -Value ([decimal]10)
+    $fontColor.Font = $font
+    return $fontColor
+}
+
 function Invoke-VibeyApply {
     param([Parameter(Mandatory)]$Request)
 
@@ -321,6 +342,152 @@ function Invoke-VibeyApply {
                     if ($op.action -eq 'setFontSize') { Set-VibeyComProperty -ComObject $font -Name 'Size' -Value ([decimal]$op.fontSizePt) }
                     if ($op.action -eq 'setBold')     { Set-VibeyComProperty -ComObject $font -Name 'Bold' -Value ([bool]$op.bold) }
                     Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                { $_ -in 'addText','addLine','addBox','addField','addSpecialField' } {
+                    <#
+                        MEASURED: ReportObjectController has no CreateReportObject method at
+                        all -- the brief's guessed `CreateReportObject($kindEnum)` call and its
+                        kind integers do not exist on the live object. Printing
+                        `$doc.ReportDefController.ReportObjectController | Get-Member` shows
+                        only Add(ISCRReportObject, ISCRSection, int), AddByName, Remove, Modify,
+                        GetAllReportObjects, GetReportObjectsByKind, ImportPicture. Objects are
+                        instead constructed directly as the concrete ReportDefModel classes
+                        (TextObjectClass, LineObjectClass, BoxObjectClass, FieldObjectClass) and
+                        handed straight to Add(obj, section, -1) -- the same shape the C#
+                        LayoutApplier.cs reference uses.
+                    #>
+                    $sec = Find-VibeySection -Doc $doc -Name $op.section
+                    switch ([string]$op.action) {
+                        'addText' {
+                            <#
+                                MEASURED: TextObjectClass.Text is a COM ReadOnly property --
+                                assigning it directly (the brief's `$new.Text = ...`) throws
+                                "'Text' is a ReadOnly property" immediately. The real text lives
+                                in a Paragraph -> ParagraphElement tree instead.
+
+                                MEASURED, the expensive way (a genuine ~30s hang, killed and
+                                diagnosed rather than waited out, per the task's guidance):
+                                PowerShell's plain dot-notation `.Add($element)` /
+                                `.Add($paragraph)` against the ParagraphElements / Paragraphs COM
+                                collections never returns -- no exception, no timeout. A
+                                Type.InvokeMember-based Add (the same idiom
+                                Get/Set-VibeyComProperty use for the font trap) fails FAST
+                                instead, with "Specified cast is not valid." -- a real, useful
+                                clue. The fix that actually works: cast the element/paragraph to
+                                its ISCRParagraphElement/ISCRParagraph interface BEFORE the plain
+                                dot-notation .Add() call. Once PowerShell is holding a reference
+                                typed as the interface, the identical .Add() call that hung
+                                returns immediately. Round-tripped through save/reopen and read
+                                back correctly.
+                            #>
+                            $new = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.TextObjectClass
+                            $new.Name = [string]$op.newName
+                            $new.Left = [int]$op.leftTwips ; $new.Top    = [int]$op.topTwips
+                            $new.Width = [int]$op.widthTwips; $new.Height = [int]$op.heightTwips
+
+                            $para = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.ParagraphClass
+                            $elem = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.ParagraphTextElementClass
+                            $elem.Text = [string]$op.text
+                            $castElem = [CrystalDecisions.ReportAppServer.ReportDefModel.ISCRParagraphElement]$elem
+                            $para.ParagraphElements.Add($castElem)
+                            $castPara = [CrystalDecisions.ReportAppServer.ReportDefModel.ISCRParagraph]$para
+                            $new.Paragraphs.Add($castPara)
+
+                            $doc.ReportDefController.ReportObjectController.Add($new, $sec, -1)
+                        }
+                        'addLine' {
+                            <#
+                                MEASURED: a bare Line/Box (Left/Top/Width/Height only) adds
+                                without error but reads back Width/Height = 0 -- Right/Bottom are
+                                the object's real geometry and Width/Height are derived from
+                                them, so both pairs must be set. Omitting EndSectionName makes
+                                Add throw COMException "Report section not found."
+                            #>
+                            $new = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.LineObjectClass
+                            $new.Name = [string]$op.newName
+                            $new.Left = [int]$op.leftTwips ; $new.Top    = [int]$op.topTwips
+                            $new.Width = [int]$op.widthTwips; $new.Height = [int]$op.heightTwips
+                            $new.Right  = [int]$op.leftTwips + [int]$op.widthTwips
+                            $new.Bottom = [int]$op.topTwips  + [int]$op.heightTwips
+                            $new.LineThickness = 15
+                            $new.LineStyle = 1   # crLineStyleSingle (reflected CrLineStyleEnum)
+                            $new.EndSectionName = $sec.Name
+                            $doc.ReportDefController.ReportObjectController.Add($new, $sec, -1)
+                        }
+                        'addBox' {
+                            $new = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.BoxObjectClass
+                            $new.Name = [string]$op.newName
+                            $new.Left = [int]$op.leftTwips ; $new.Top    = [int]$op.topTwips
+                            $new.Width = [int]$op.widthTwips; $new.Height = [int]$op.heightTwips
+                            $new.Right  = [int]$op.leftTwips + [int]$op.widthTwips
+                            $new.Bottom = [int]$op.topTwips  + [int]$op.heightTwips
+                            $new.LineThickness = 15
+                            $new.LineStyle = 1   # crLineStyleSingle
+                            $new.EndSectionName = $sec.Name
+                            $doc.ReportDefController.ReportObjectController.Add($new, $sec, -1)
+                        }
+                        'addField' {
+                            <#
+                                MEASURED (and per the task brief): a freshly constructed
+                                FieldObjectClass throws COMException "The field value type is
+                                not valid." unless FieldValueType is set explicitly.
+                                DataDefController.FindFieldByFormulaForm resolves the field's
+                                ISCRField -- including its .Type (CrFieldValueTypeEnum) -- with
+                                no database contact.
+                            #>
+                            $f = $doc.DataDefController.FindFieldByFormulaForm([string]$op.fieldRef)
+                            if (-not $f) { throw "Field `"$($op.fieldRef)`" was not found in the report's data source." }
+                            $new = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.FieldObjectClass
+                            $new.Name = [string]$op.newName
+                            $new.Left = [int]$op.leftTwips ; $new.Top    = [int]$op.topTwips
+                            $new.Width = [int]$op.widthTwips; $new.Height = [int]$op.heightTwips
+                            $new.DataSource = [string]$op.fieldRef
+                            $new.FieldValueType = $f.Type
+                            $new.FontColor = New-VibeyDefaultFontColor
+                            $doc.ReportDefController.ReportObjectController.Add($new, $sec, -1)
+                        }
+                        'addSpecialField' {
+                            <#
+                                MEASURED: the DataDefModel coclass is "SpecialFieldClass", not
+                                "SpecialField" as the brief guessed -- New-Object with the bare
+                                name fails to resolve a type. CrSpecialFieldTypeEnum's real
+                                integers are ALL one lower than the brief's guessed table
+                                (pageNumber=9 not 10, pageNOfM=19 not 20, totalPageCount=11 not
+                                12, printDate=2 not 3, printTime=3 not 4, reportTitle=12 not 13,
+                                recordNumber=8 not 9) -- reflected directly off the installed
+                                CrSpecialFieldTypeEnum and cross-checked by reading back the
+                                FormulaForm each value produces. Using the brief's numbers would
+                                not have thrown; it would have silently bound the WRONG special
+                                field (e.g. requesting pageNOfM's guessed 20 actually resolves to
+                                crSpecialFieldTypeReportPath). A bare SpecialFieldClass with only
+                                SpecialType set derives FormulaForm/Type/Length on its own, with
+                                no report or database contact.
+                            #>
+                            $special = New-Object CrystalDecisions.ReportAppServer.DataDefModel.SpecialFieldClass
+                            $special.SpecialType = switch ([string]$op.specialType) {
+                                'pageNumber'     { 9 }  'pageNOfM'   { 19 } 'totalPageCount' { 11 }
+                                'printDate'      { 2 }  'printTime'  { 3 }  'reportTitle'    { 12 }
+                                'recordNumber'   { 8 }
+                            }
+                            $new = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.FieldObjectClass
+                            $new.Name = [string]$op.newName
+                            $new.Left = [int]$op.leftTwips ; $new.Top    = [int]$op.topTwips
+                            $new.Width = [int]$op.widthTwips; $new.Height = [int]$op.heightTwips
+                            $new.DataSource = $special.FormulaForm
+                            $new.FieldValueType = $special.Type
+                            $new.FontColor = New-VibeyDefaultFontColor
+                            $doc.ReportDefController.ReportObjectController.Add($new, $sec, -1)
+                        }
+                    }
+                }
+                'removeObject' {
+                    <#
+                        MEASURED: unlike move/resize/setFont's clone-mutate-Modify dance,
+                        Remove takes the live object directly -- no clone needed.
+                    #>
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $doc.ReportDefController.ReportObjectController.Remove($f.Object)
+                    $removedObjects += [string]$op.target
                 }
                 default {
                     throw "`"$($op.action)`" passed validation but has no applier arm yet (operation $n)."

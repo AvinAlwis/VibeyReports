@@ -77,6 +77,53 @@ It 'resizes a section and reports the new height' {
     Should-Be $s.heightTwips 1200 'section height'
 }
 
+It 'adds a text object that reads back with its text and geometry' {
+    $a = Apply-Ops @(
+        @{ action='resizeSection'; section='DetailSection1'; heightTwips=1000 },
+        @{ action='addText'; section='DetailSection1'; newName='VibeyCaption'; text='Hello'
+           leftTwips=100; topTwips=100; widthTwips=3000; heightTwips=240 },
+        @{ action='setFontSize'; target='VibeyCaption'; fontSizePt=9 }) 'addtext.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyCaption' }
+    Should-Be $o.text 'Hello' 'text'
+    Should-Be $o.widthTwips 3000 'width'
+}
+
+It 'adds a horizontal line' {
+    $a = Apply-Ops @(
+        @{ action='resizeSection'; section='DetailSection1'; heightTwips=1000 },
+        @{ action='addLine'; section='DetailSection1'; newName='VibeyRule'
+           leftTwips=0; topTwips=500; widthTwips=5000; heightTwips=0 }) 'addline.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyRule' }
+    Should-Be $o.kind 'Line' 'kind'
+}
+
+It 'adds a page number special field as a Field object' {
+    $a = Apply-Ops @(
+        @{ action='resizeSection'; section='PageFooterSection1'; heightTwips=900 },
+        @{ action='addSpecialField'; section='PageFooterSection1'; newName='VibeyPage'
+           specialType='pageNOfM'; leftTwips=100; topTwips=80; widthTwips=2000; heightTwips=220 },
+        @{ action='setFontSize'; target='VibeyPage'; fontSizePt=8 }) 'special.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyPage' }
+    Should-Be $o.kind 'Field' 'kind'
+}
+
+It 'removes an object and reports what it removed' {
+    $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
+    $t = First-FontableObject $before
+    $a = Apply-Ops @{ action='removeObject'; target=$t.name } 'remove.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    Should-Be $a.Result.removedObjects[0] $t.name 'removedObjects'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $still = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq $t.name }
+    if ($still) { throw "object $($t.name) is still present after removeObject" }
+}
+
 It 'cleans up the temp file when the destination move fails' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
     $t = First-FontableObject $before

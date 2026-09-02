@@ -997,3 +997,122 @@ disk). Isolating it — reopening the saved file and reading the same property v
 instead — showed `14` was on disk correctly the whole time. Worth recording because the failure mode
 (blank value after save+reopen) is the same symptom a genuine serialization bug would produce; the
 fix here is entirely on the read side, not the write/save side.
+
+---
+
+## PowerShell skill's add/remove path (measured 2026-09-02)
+
+Measured while implementing `addText`/`addLine`/`addBox`/`addField`/`addSpecialField`/`removeObject`
+in `Invoke-VibeyApply`, against `SampleReport.rpt` through the x86 `powershell.exe`. As the task brief
+predicted, both of its two guesses taken from the C# implementation without ever being run from
+PowerShell turned out wrong, and a third, unpredicted trap cost the most time of the two: a genuine
+hang, not an exception.
+
+### `ReportObjectController.CreateReportObject` does not exist
+
+`$doc.ReportDefController.ReportObjectController | Get-Member` shows exactly seven members: `Add
+(ISCRReportObject, ISCRSection, int)`, `AddByName(string, string)`, `GetAllReportObjects`,
+`GetReportObjectsByKind(CrReportObjectKindEnum)`, `ImportPicture`, `Modify(ISCRReportObject,
+ISCRReportObject)`, `Remove(ISCRReportObject)`. No `CreateReportObject` anywhere, so the brief's
+`$kindEnum`/`CreateReportObject($kindEnum)` code could never have run. The fix — matching the C#
+`LayoutApplier.cs` reference — is to construct the concrete `CrystalDecisions.ReportAppServer.
+ReportDefModel` class directly (`TextObjectClass`, `LineObjectClass`, `BoxObjectClass`,
+`FieldObjectClass`) and hand it straight to `Add(obj, section, -1)`. All four constructed cleanly via
+plain `New-Object` once the assembly was loaded (by opening any document first — see note 1).
+
+### `TextObjectClass.Text` is read-only; the brief's direct assignment throws immediately
+
+The brief's `addText` code (`$new.Text = [string]$op.text`) throws `'Text' is a ReadOnly property`
+the instant it runs — `Get-Member` on a fresh `TextObjectClass` confirms `Text` has no COM setter.
+The real content lives in a `Paragraph` → `ParagraphElement` tree, matching what the C# reference
+(`docs/sdk-notes.md` note 4, "A freshly added `TextObjectClass`...") already found for fonts:
+construct a `ParagraphTextElementClass` with `.Text` set, add it to a `ParagraphClass`'s
+`ParagraphElements`, add that paragraph to the text object's `Paragraphs`.
+
+### `ParagraphElements.Add(element)` / `Paragraphs.Add(paragraph)` hang — cast to the interface type first
+
+This is the expensive one. Building the tree above and calling plain dot-notation
+`$para.ParagraphElements.Add($elem)` **never returns** — no exception, no COM error, just a hung
+`powershell.exe` process, reproduced twice with a hard 30s `Start-Process`/`WaitForExit` timeout and
+killed both times (per the task's own guidance: diagnose, don't wait). Two follow-up probes narrowed
+it down:
+
+- `$pes.GetType().InvokeMember('Add', [Reflection.BindingFlags]::InvokeMethod, $null, $pes, @($elem))`
+  — the `Type.InvokeMember` idiom `Get/Set-VibeyComProperty` already use for the font trap — fails
+  **fast** instead of hanging, with `"Specified cast is not valid."` A real, useful clue: `Add` wants
+  its argument typed as the element's interface, not the concrete coclass.
+- Casting explicitly before the plain dot-notation call fixes it outright:
+  ```powershell
+  $castElem = [CrystalDecisions.ReportAppServer.ReportDefModel.ISCRParagraphElement]$elem
+  $para.ParagraphElements.Add($castElem)      # returns immediately
+  $castPara = [CrystalDecisions.ReportAppServer.ReportDefModel.ISCRParagraph]$para
+  $new.Paragraphs.Add($castPara)              # same fix, same collection shape
+  ```
+  Once PowerShell is holding a reference typed as the interface rather than the concrete class, the
+  *identical* `.Add()` call that hung for 30+ seconds returns immediately. Round-tripped through
+  `Save-VibeyDocument` and reopened: `text = "Hello"`, `widthTwips = 3000`, both correct.
+
+Also tried and rejected: `SimpleTextObjectClass` (found by reflection — it has a genuinely writable
+`.Text` property, no Paragraphs needed, and `Kind` reads `crReportObjectKindText`). It looked like the
+better answer, but `ReportObjectController.Add(simpleText, section, -1)` throws a plain .NET
+`System.NullReferenceException` from inside the interop marshalling, not a `COMException` — a
+different, less informative failure than "Report section not found" or the field-value-type message,
+and not one this module's `COMException`-shaped error handling was written to explain. `TextObjectClass`
++ the interface-cast `Paragraphs` fix above is the one actually used.
+
+### A bare Line or Box adds cleanly but reads back `width = 0`; `Right`/`Bottom` are the real geometry
+
+Setting only `Left`/`Top`/`Width`/`Height` on a fresh `LineObjectClass`/`BoxObjectClass` and calling
+`Add` raises no error at all — the object is silently accepted with the wrong shape. Reopening the
+saved report reads `widthTwips = 0`/`heightTwips = 0` regardless of what `Width`/`Height` were set to.
+`Width`/`Height` turn out to be *derived* from `Right`/`Bottom`, exactly as the C# reference already
+sets them (`Right = Left + Width`, `Bottom = Top + Height`); once both pairs are set, the read-back
+width/height are correct. Separately, omitting `EndSectionName` makes `Add` throw `COMException:
+Report section not found.` immediately — a loud failure, not silent, and both `addLine`/`addBox` set
+it to the target section's own name (as the C# reference does).
+
+### `SpecialFieldClass`, not `SpecialField` — and every one of the brief's enum integers is off by one
+
+`New-Object CrystalDecisions.ReportAppServer.DataDefModel.SpecialField` fails to resolve a type; the
+real coclass is `SpecialFieldClass` (confirmed by reflecting the assembly's types matching
+`*Special*`: `CrSpecialFieldTypeEnum`, `ISCRSpecialField`, `SpecialField` (the bare interface),
+`SpecialFieldClass`).
+
+Reflecting `CrSpecialFieldTypeEnum` directly gives the real integers, and every one of the seven this
+tool uses is exactly **one lower** than the brief's guessed table:
+
+| specialType | brief's guess | measured (real) |
+|---|---|---|
+| pageNumber | 10 | 9 |
+| pageNOfM | 20 | 19 |
+| totalPageCount | 12 | 11 |
+| printDate | 3 | 2 |
+| printTime | 4 | 3 |
+| reportTitle | 13 | 12 |
+| recordNumber | 9 | 8 |
+
+This is the most dangerous kind of wrong number: using the brief's values would **not** have thrown.
+`SpecialType = 20` is a legal enum member (`crSpecialFieldTypeReportPath`), so `addSpecialField
+specialType='pageNOfM'` would have silently placed a report-path field instead — accepted by RAS,
+written to the `.rpt`, and wrong. Confirmed correct against the earlier "The formatting operations"
+measurement table in this file (same `FormulaForm`/`Type`/`Length` results reproduced here): setting
+`SpecialType = 19` on a bare `SpecialFieldClass` reads back `FormulaForm = "PageNofM"` (lowercase `o`),
+`Type = crFieldValueTypeStringField`.
+
+### A freshly constructed `FieldObjectClass` has `FontColor = $null`; `TextObjectClass` does not
+
+Checked because the two `addSpecialField`/`addField` tests both chain a `setFontSize` onto the object
+they just added, in the same plan. `setFontSize`'s existing arm dereferences `$clone.FontColor.Font`,
+which throws on `$null`. Measured: a fresh `TextObjectClass`'s `FontColor` (and `.FontColor.Font`) are
+already non-null before `Add` is even called — no fix needed there. A fresh `FieldObjectClass`'s
+`FontColor` is `$null` until set explicitly. `addField` and `addSpecialField` both assign a
+`New-VibeyDefaultFontColor` (Arial 10pt, written through `Set-VibeyComProperty` for `Size` — the same
+nested-COM-object trap `setFontSize` already works around) before calling `Add`, so a same-plan
+`setFontSize`/`setBold`/`setFont` on the object they just created has something to mutate.
+
+### `removeObject` needs no clone
+
+Unlike `move`/`resize`/`setFont*` (Clone → mutate → `Modify(old, new)`),
+`ReportObjectController.Remove(ISCRReportObject)` takes the live object directly — confirmed by the
+same `Get-Member` listing used for `CreateReportObject` above, and by removing a `Field` object end to
+end (save, reopen, confirm it is gone from the schema).
