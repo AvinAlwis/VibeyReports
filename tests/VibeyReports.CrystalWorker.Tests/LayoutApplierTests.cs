@@ -1966,4 +1966,186 @@ public class LayoutApplierTests
         }
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
+
+    // ---- addGroup / addSort ------------------------------------------------
+
+    // SampleReport.rpt's two result fields, both String, neither grouped nor sorted in the fixture.
+    private const string CardCode = "{Command.CardCode}";
+    private const string CardName = "{Command.CardName}";
+
+    /// <summary>
+    /// The load-bearing test of the whole feature: it asserts that the section names
+    /// LayoutPlanValidator PREDICTS through GroupSectionNaming are the names Crystal actually
+    /// assigns. If that ever diverges, a plan that validates would throw mid-apply -- the exact
+    /// failure mode addSubreport's SubreportName/Name split produced.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsAGroupAndCrystalNamesItsSectionsAsTheValidatorPredicts()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations = { new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = CardCode } }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Groups.Should().ContainSingle();
+            schema.Groups[0].FieldRef.Should().Be(CardCode);
+            schema.Groups[0].HeaderSection.Should().Be(GroupSectionNaming.HeaderSection(CardCode));
+            schema.Groups[0].FooterSection.Should().Be(GroupSectionNaming.FooterSection(CardCode));
+
+            schema.Sections.Should().Contain(s => s.Kind == "GroupHeader");
+            schema.Sections.Should().Contain(s => s.Kind == "GroupFooter");
+            FindSection(schema, GroupSectionNaming.HeaderSection(CardCode)).Kind.Should().Be("GroupHeader");
+            FindSection(schema, GroupSectionNaming.FooterSection(CardCode)).Kind.Should().Be("GroupFooter");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Two groups in one plan, indexed against the cumulative simulation. Also pins the ORDER:
+    /// groups[0] is the outer group, and its footer section is the LAST group footer in the
+    /// document -- the mapping ReportReader has to get right to report the two names at all.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsTwoGroupsAndBothReadBackInOrder()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = CardCode, GroupIndex = 0 },
+                new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = CardName, GroupIndex = 1 }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Groups.Should().HaveCount(2);
+            schema.Groups[0].FieldRef.Should().Be(CardCode);
+            schema.Groups[1].FieldRef.Should().Be(CardName);
+            schema.Groups[0].HeaderSection.Should().Be(GroupSectionNaming.HeaderSection(CardCode));
+            schema.Groups[1].HeaderSection.Should().Be(GroupSectionNaming.HeaderSection(CardName));
+            schema.Groups[0].FooterSection.Should().Be(GroupSectionNaming.FooterSection(CardCode));
+            schema.Groups[1].FooterSection.Should().Be(GroupSectionNaming.FooterSection(CardName));
+
+            // Group headers print outermost-first, group footers outermost-LAST.
+            var bands = schema.Sections.Select(s => s.Name).ToList();
+            bands.IndexOf(schema.Groups[0].HeaderSection).Should().BeLessThan(bands.IndexOf(schema.Groups[1].HeaderSection));
+            bands.IndexOf(schema.Groups[1].FooterSection).Should().BeLessThan(bands.IndexOf(schema.Groups[0].FooterSection));
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// Asserts the SAME property addSort writes -- SortInfo.Direction, read back off
+    /// DataDefinition.Sorts after save and reopen. Both directions, because a test that only ever
+    /// asks for the value Crystal defaults to could never fail.
+    /// </summary>
+    [Theory]
+    [InlineData(SortDirections.Ascending)]
+    [InlineData(SortDirections.Descending)]
+    public void Apply_AddsASortAndItsDirectionSurvivesSaveAndReopen(string direction)
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddSort, FieldRef = CardName, Direction = direction }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Sorts.Should().ContainSingle();
+            schema.Sorts[0].FieldRef.Should().Be(CardName);
+            schema.Sorts[0].Direction.Should().Be(direction);
+            schema.Groups.Should().BeEmpty(because: "a sort is not a group");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// A group's direction is not a property of the group -- ISCRGroupOptions carries none, so the
+    /// applier reaches it through the sort Crystal creates for the grouped field. Descending
+    /// specifically, because ascending is what Crystal would have produced anyway.
+    /// </summary>
+    [Fact]
+    public void Apply_AddsADescendingGroupAndTheDirectionSurvivesSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddGroup, FieldRef = CardCode, Direction = SortDirections.Descending
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            schema.Groups.Should().ContainSingle();
+            schema.Groups[0].Direction.Should().Be(SortDirections.Descending);
+            // The group's own sort, which is where that direction actually lives.
+            schema.Sorts.Should().ContainSingle();
+            schema.Sorts[0].FieldRef.Should().Be(CardCode);
+            schema.Sorts[0].Direction.Should().Be(SortDirections.Descending);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The payoff of measuring the naming rule instead of guessing it: creating a group and
+    /// placing content into the section it creates, in ONE plan. If the prediction were wrong this
+    /// would fail at FindSection during the apply rather than at validation.
+    /// </summary>
+    [Fact]
+    public void Apply_PlacesTextIntoAGroupHeaderCreatedEarlierInTheSamePlan()
+    {
+        var header = GroupSectionNaming.HeaderSection(CardCode);
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = CardCode },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddText, Section = header, NewName = "GroupTitle",
+                    Text = "Customer", LeftTwips = 0, TopTwips = 0, WidthTwips = 2880, HeightTwips = 240
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            var section = FindSection(schema, header);
+            section.Kind.Should().Be("GroupHeader");
+            var text = section.Objects.Single(o => o.Name == "GroupTitle");
+            text.Kind.Should().Be("Text");
+            text.Text.Should().Be("Customer");
+            text.WidthTwips.Should().Be(2880);
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// A report with no groups must read back as EMPTY lists, not as a failed read -- the
+    /// defensive contract every other optional part of the schema follows.
+    /// </summary>
+    [Fact]
+    public void Read_ReportsEmptyGroupsAndSortsForAnUngroupedReport()
+    {
+        using var session = CrystalSession.Open(Fixtures.SampleReport);
+        var schema = ReportReader.Read(session);
+
+        schema.Groups.Should().NotBeNull().And.BeEmpty();
+        schema.Sorts.Should().NotBeNull().And.BeEmpty();
+    }
 }

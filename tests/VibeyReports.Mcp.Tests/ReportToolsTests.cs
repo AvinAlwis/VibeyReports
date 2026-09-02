@@ -167,6 +167,66 @@ public class ReportToolsTests
         json.Should().Contain("error");
     }
 
+    /// <summary>
+    /// The grouping half of the schema at the MCP boundary. Built from a real apply_layout round
+    /// trip rather than a hand-made schema, so a regression anywhere in the worker/MCP wiring shows
+    /// up here, and asserts the JSON property names the agent actually has to read -- including
+    /// headerSection/footerSection, which are the only way it can learn what Crystal called the
+    /// sections it created.
+    ///
+    /// SampleReport.rpt has no groups and no sorts of its own, so every value asserted below is one
+    /// this plan put there.
+    /// </summary>
+    [Fact]
+    public async Task ReadReport_JsonIncludesGroupsAndSorts()
+    {
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        var planJson = JsonSerializer.Serialize(new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddGroup, FieldRef = "{Command.CardCode}",
+                    Direction = SortDirections.Descending
+                },
+                new LayoutOperation
+                {
+                    Action = LayoutActions.AddSort, FieldRef = "{Command.CardName}",
+                    Direction = SortDirections.Ascending
+                }
+            }
+        }, VibeyJson.Options);
+
+        try
+        {
+            var applied = await Tools().ApplyLayout(Fixtures.SampleReport, dest, planJson, false, CancellationToken.None);
+            applied.Should().Contain("\"ok\": true");
+
+            var json = await Tools().ReadReport(dest, CancellationToken.None);
+
+            foreach (var property in new[] { "groups", "sorts", "fieldRef", "direction", "headerSection", "footerSection" })
+                json.Should().Contain(property);
+
+            var schema = JsonSerializer.Deserialize<ReportSchema>(json, VibeyJson.Options)!;
+
+            schema.Groups.Should().ContainSingle();
+            schema.Groups[0].FieldRef.Should().Be("{Command.CardCode}");
+            schema.Groups[0].Direction.Should().Be(SortDirections.Descending);
+            schema.Groups[0].HeaderSection.Should().Be(GroupSectionNaming.HeaderSection("{Command.CardCode}"));
+            schema.Groups[0].FooterSection.Should().Be(GroupSectionNaming.FooterSection("{Command.CardCode}"));
+
+            // Two sorts: the one addSort added, plus the one Crystal maintains for the group.
+            schema.Sorts.Should().HaveCount(2);
+            schema.Sorts.Should().Contain(s => s.FieldRef == "{Command.CardCode}" && s.Direction == SortDirections.Descending);
+            schema.Sorts.Should().Contain(s => s.FieldRef == "{Command.CardName}" && s.Direction == SortDirections.Ascending);
+
+            schema.Sections.Should().Contain(s => s.Kind == "GroupHeader");
+            schema.Sections.Should().Contain(s => s.Kind == "GroupFooter");
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
     [Fact]
     public async Task ApplyLayout_AppliesAValidPlanAndReportsTheOutputPath()
     {

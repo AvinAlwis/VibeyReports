@@ -1322,3 +1322,90 @@ hash-checked unchanged; `out/reports/` and `tests/fixtures/` were never written 
 - The section and object format properties (`EnableNewPageBefore`/`EnableNewPageAfter`,
   `EnableSuppress` on both hosts, `EnableSuppressIfBlank`, `EnableCanGrow`) round-trip through the
   existing idioms with no surprises.
+
+---
+
+## Tier 2 grouping and sorting: addGroup, addSort (2026-09-02)
+
+`LayoutActions.All` goes from twenty-six to twenty-eight. Both operations are offline; neither
+contacts the database or reads `VIBEY_DB_PASSWORD`.
+
+### The measurement the brief front-loaded, and what it decided
+
+The brief required the group-section naming to be measured before the validator was written,
+because the two possible answers led to two different designs. Measured (full write-up in
+`docs/sdk-notes.md`): **naming is deterministic, but from the FIELD NAME, not the group index, and
+with every non-alphanumeric character stripped.** A group on `{Command.CardCode}` produces
+`CardCodeHeaderSection1`; a group on `{sp_perf_ind_perf_overview;1.overall_comment}` produces
+`overallcommentHeaderSection1`.
+
+So the good design was taken: `LayoutPlanValidator` registers the two predicted names in its
+cumulative simulation, and `[addGroup, addText into the new group header]` validates as one plan.
+
+Note how narrowly the bad outcome was avoided. The obvious guess — keep the field name verbatim —
+is **wrong**, and a validator built on it would have accepted plans that then threw at
+`FindSection` mid-apply, faulting the session and losing the whole plan. That is the same shape as
+the `ImportSubreportEx` name split. The rule lives in one place (`GroupSectionNaming`), is pinned by
+its own unit test, and — the part that actually protects this — is asserted against *Crystal's own
+output* by a worker round-trip test, so a divergence in some future report shape fails a test here
+rather than a plan at a customer.
+
+Ruling: **the predicted names are a validator-side convenience only.** `ReportReader` reports the
+names Crystal actually assigned and never consults the prediction, so `read_report` is always the
+truth and the prediction can only ever make the validator wrong, never the report.
+Cost if wrong: a plan that combines addGroup with a placement is rejected (or, worse, accepted and
+then fails mid-apply); recoverable in two plans, and the round-trip test is what stops it silently.
+
+Ruling: **when the predicted name collides with a section the report already has, the plan may not
+place into it.** Rare — it needs two same-named fields from different tables — but the alternative
+is writing into the wrong section and reporting success. The `addGroup` itself is still accepted
+(Crystal has no problem with it); only a same-plan placement into the ambiguous name is refused,
+with a message telling the caller to read the report back and use the real name.
+Cost if wrong: an occasional two-plan detour instead of one.
+
+### Three further corrections to the brief, all forced by measurement
+
+Ruling: **`direction` is not a property of a group, and `addGroup` applies it through the sort.**
+`ISCRGroupOptions` has no direction at all — `GroupController.Add` creates an entry in
+`DataDefinition.Sorts` for the grouped field instead. The applier therefore sets a group's
+direction with `SortController.ModifySortDirection`, and **only when the caller supplied one**.
+That is a deliberate departure from the brief's "`ascending` (default)": Crystal's own default for
+a new group's sort *is* ascending, so the observable behaviour matches, but a group that adopts a
+field's pre-existing descending sort keeps it rather than being silently flipped by an operation
+that never mentioned direction. Cost if wrong: an addGroup with no direction on an already-sorted
+field leaves that field's existing order alone; stating a direction overrides it.
+
+Ruling: **`ReportSchema.Sorts` reports a grouped report's group sorts, and that is correct rather
+than leaky.** They genuinely are in `DataDefinition.Sorts`; hiding them would make
+`GroupInfo.Direction` unexplainable and would make `addSort`'s "already sorted" rejection look
+arbitrary. Documented in both tool descriptions.
+
+Ruling: **the validator rejects a duplicate group and a duplicate sort.** Measured: Crystal answers
+each with a COMException (`The grouping already exists.` / `The sorting already exists`). Because
+every group carries a sort on its own field, that second rule also covers `addSort` against a
+grouped field, and the message says so and points at `addGroup`'s own `direction` instead. Without
+these the plan validates and then faults the session mid-apply. `addGroup` on a field that merely
+has a standalone sort is deliberately still ALLOWED, because Crystal allows it (it adopts the sort).
+Cost if wrong: none; both rules are strictly narrowing and both mirror a measured refusal.
+
+Ruling: **`fieldRef` is checked against `AvailableFields` only when that list is non-empty**, per
+the brief and following `removeTable` and `setNumberFormat`. Worth stating why this is not a
+weakening of `addField`'s allowlist: `addField` fails closed on an empty list because it BINDS NEW
+DATA into the report and the allowlist is its security boundary. `addGroup`/`addSort` bind nothing —
+they reference a field the report already selects — so there is no boundary to fail closed on, and
+rejecting on an empty list would only break them whenever the VPN is down.
+
+Ruling: **`GroupController.AddByName` is not used, though unlike the `AddByName` of sdk-note 6 it
+does work.** Measured: with a formula form it produces an identical result to `Add`; with a raw
+field name or an unknown one it throws `COMException: Database Field Not Found`, naming neither the
+operation nor the field the caller wrote. `FindFieldByFormulaForm` returns **null** (not a throw)
+for an unknown formula, so resolving explicitly buys a message that names the field and points at
+`availableFields`. It also avoids passing a `CrDateConditionEnum` that is meaningless for a
+non-date field. Cost if wrong: none; the two paths were measured to produce the same report.
+
+### Scope held
+
+No `removeGroup`/`removeSort` (removing a group destroys its sections and everything in them —
+the `removeTable` cascade shape, and it needs its own review). No TopN sorting: the four
+`CrSortDirectionEnum` TopN variants each need an N no operation field can carry, so the validator
+rejects them by name rather than passing them to COM. No `GroupFilterController`.

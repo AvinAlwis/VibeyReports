@@ -224,8 +224,9 @@ public sealed class ReportTools
         same field, and this tool rejects both before writing anything.
         Groups and sorts read back through read_report as "groups" and "sorts".
         All coordinates are twips (1440 = 1 inch).
-        Layout only: database connections, SQL, formulas, parameters and record selection cannot be
-        changed and any attempt is rejected. The whole plan is validated
+        Layout, data-source bindings, grouping and sorting only: database connections, SQL,
+        formulas, parameters and record selection cannot be changed and any attempt is rejected.
+        The whole plan is validated
         before anything is written, so a rejected plan leaves no output file behind.
         On success the result includes the refreshed schema, so you do not need a follow-up
         read_report to see the new object names, positions or section heights.

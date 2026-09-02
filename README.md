@@ -118,10 +118,11 @@ worker; a failed probe writes to stderr and exits 1.)
 `move`, `resize`, `setFont`, `setFontSize`, `setBold`, `setAlignment`, `addText`, `addLine`,
 `addBox`, `resizeSection`, `addField`, `removeObject`, `setTextColor`, `setFillColor`,
 `setLineColor`, `setSectionBackground`, `addSubreport`, `setSubreportLink`, `removeTable`,
-`addTable`, `setTableLocation` — twenty-one in all (`LayoutActions.All`).
+`addTable`, `setTableLocation`, `setSectionBreak`, `addSpecialField`, `setNumberFormat`,
+`setCanGrow`, `setSuppress`, `addGroup`, `addSort` — twenty-eight in all (`LayoutActions.All`).
 
-Layout and data-source bindings. SQL, formulas, parameters, record selection and grouping cannot
-be changed; `LayoutPlanValidator` rejects any attempt. **The database is only ever read** — the
+Layout, data-source bindings, grouping and sorting. SQL, formulas, parameters and record selection
+cannot be changed; `LayoutPlanValidator` rejects any attempt. **The database is only ever read** — the
 three table operations rewrite the report's own binding metadata and nothing else, and **no
 operation accepts a username or password**, ever (plans are JSON files on disk; `addTable` clones
 the connection of a table already in the report instead). Where a password is unavoidable —
@@ -141,6 +142,22 @@ Crystal itself will remove such a table *and silently delete every object bound 
 see `docs/sdk-notes.md`), so the validator refuses while any bound object survives; remove those
 objects earlier in the same plan and the removal is accepted. Removed aliases come back in the
 response as `removedTables`.
+
+`addGroup` is the only operation that creates a section. Crystal's band structure is otherwise
+fixed through this SDK, so a page that has to repeat once per employee cannot live in the Report
+Header (which prints once per report) — group the report on the employee's field and that content
+becomes a Group Header. Crystal names the two sections it creates, from the grouped **field's**
+name with every non-alphanumeric character removed:
+`{sp_perf_ind_perf_overview;1.emp_number}` → `empnumberHeaderSection1` / `empnumberFooterSection1`
+(measured; the underscores really are dropped). Because the rule is deterministic, a plan may
+create a group and place objects into its new sections in one go. `read_report` reports each
+group's real `headerSection`/`footerSection`, so nothing depends on reproducing the rule by hand.
+
+`addSort` makes the record order a property of the report rather than a hope about the stored
+procedure's `ORDER BY`. Only `ascending` and `descending` are supported. A group's order **is** a
+sort in Crystal, so a grouped field is already sorted — `addGroup` takes its own `direction`, and a
+second group or a second sort on the same field is rejected before anything is written. Groups and
+sorts read back through `read_report` as `groups` and `sorts`.
 
 ### `addTable` / `setTableLocation` and `VIBEY_DB_PASSWORD`
 

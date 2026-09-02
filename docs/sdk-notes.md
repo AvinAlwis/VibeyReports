@@ -650,3 +650,112 @@ regardless of value type, so `ObjectInfo.NumberFormat` is populated for Field ob
 Re-confirmed while scoping `setSectionBreak`: `ISCRReportDefController`'s only Add/Modify/Remove
 methods are for chart objects. A report's band structure is fixed as far as this SDK is concerned,
 so a page break is always set on a section that already exists.
+
+**Superseded in one respect by the grouping work below:** `GroupController.Add` *does* create
+sections — a Group Header and a Group Footer per group. It remains true that no method adds or
+removes a section directly, and `addGroup` is the only operation in this tool that creates one.
+
+---
+
+## Grouping and sorting (measured 2026-09-02)
+
+Measured against the installed 11.5 assemblies through a purpose-built 32-bit probe (the usual
+`ReportDocument.Load(...).ReportClientDocument` bridge), against copies of
+`tests/fixtures/SampleReport.rpt` and `tests/fixtures/PMSV10_IndPerfOverview.rpt` written to a
+scratch directory outside the repo. No fixture and nothing under `out/reports/` was written to.
+
+Three of the brief's assumptions were contradicted.
+
+### Crystal names the group's sections after the FIELD, with non-alphanumerics stripped
+
+This was the measurement the design hung on, and the obvious guess is wrong.
+
+Adding a group creates a Group Header **area** and a Group Footer **area**, each holding one
+section. The names come from the grouped field's `Name`, not from the group's index:
+
+| Grouped field | Areas created | Sections created |
+|---|---|---|
+| `{Command.CardCode}` | `CardCodeHeader`, `CardCodeFooter` | `CardCodeHeaderSection1`, `CardCodeFooterSection1` |
+| `{sp_perf_ind_perf_overview;1.overall_comment}` | `overallcommentHeader`, `overallcommentFooter` | `overallcommentHeaderSection1`, `overallcommentFooterSection1` |
+
+**The underscores are dropped.** A validator that registered `overall_commentHeaderSection1` would
+have accepted plans that then threw at `FindSection` mid-apply — the same shape of failure as the
+`ImportSubreportEx` name split. The rule, as implemented in
+`Contracts/ReportSchema.cs → GroupSectionNaming`, is: take the field name (the part after the last
+`.`, braces stripped), remove every character that is not a letter or a digit, then append
+`Header`/`Footer` + `Section1`. Only `[A-Za-z0-9_]` field names have been measured; the `;1`
+procedure suffix in the *table* part is irrelevant because only the field part is used.
+
+Because the rule is deterministic, `LayoutPlanValidator` registers the two predicted names in its
+cumulative simulation, so `[addGroup, addText into the new group header]` validates as **one**
+plan. `LayoutApplierTests.Apply_AddsAGroupAndCrystalNamesItsSectionsAsTheValidatorPredicts` asserts
+the prediction against what Crystal actually assigned, so a divergence fails a test rather than a
+customer's plan. `ReportReader` never uses the prediction — it reports the real names, and those
+are what `read_report` shows.
+
+Ordering, also measured: group **headers** appear after the Page Header in group order (outermost
+first); group **footers** appear before the Page Footer in **reverse** group order. `ReportReader`
+maps group *i* to header area *i* and footer area *n-1-i* on that basis, and only when the counts
+line up exactly — a wrong section name is worse than none, because it is the name the caller would
+then place objects into.
+
+A new group section starts **250 twips** tall on every fixture tried, which is what the validator
+registers so that a same-plan `addText` can be bounds-checked. Getting that number wrong could only
+make the validator's bounds check slightly wrong: Crystal itself does not bounds-check an added
+object against its section, so it can never cause a mid-plan COM failure. `resizeSection` in the
+same plan is the documented way to make more room.
+
+### A group has no direction of its own — a group's order IS a sort
+
+`ISCRGroupOptions` exposes only `ClassName` and `ConditionFormulas`. There is no direction, no
+sort order and no `Condition` property on it at all.
+
+What actually happens: `GroupController.Add` creates an entry in `DataDefinition.Sorts` for the
+grouped field, ascending. If the field **already** carried a sort, the group adopts it and keeps
+its existing direction (measured: a descending standalone sort on `{Command.CardName}` stayed
+descending after grouping on that field, and the sort count stayed at 1).
+
+So `addGroup`'s `direction` is applied with `SortController.ModifySortDirection` against that sort,
+and **only when the caller supplied one** — an `addGroup` with no direction must not silently flip
+an order the report already had. `ModifySortDirection` persists through save and reopen.
+
+The consequence for the schema is that `ReportSchema.Sorts` legitimately reports one entry per
+group before any `addSort` has been issued. That is the truth about the report, not an artefact:
+`GroupInfo.Direction` is read from that same entry.
+
+### Crystal refuses a duplicate group or a duplicate sort on the same field
+
+| Attempt | Result |
+|---|---|
+| second `GroupController.Add` on an already-grouped field | `COMException: The grouping already exists.` |
+| second `SortController.Add` on an already-sorted field | `COMException: The sorting already exists` |
+| `GroupController.Add` on a field that already has a standalone sort | **succeeds**, adopting that sort |
+| `SortController.Add` on a field the report groups on | `COMException: The sorting already exists` (the group's own sort is already there) |
+
+`LayoutPlanValidator` rejects the first, second and fourth before anything is written, so neither
+operation can fault a session mid-plan. The third is deliberately allowed, because Crystal allows it.
+
+### `GroupController.AddByName` works, and is still the worse path
+
+Unlike the `ReportObjectController.AddByName` of note 6 — which had no reachable success case at all
+— this one does work, and produces exactly the same result as the explicit path:
+
+- `AddByName(-1, "{Command.CardCode}", crDateConditionDaily)` → one group, sections
+  `CardCodeHeaderSection1` / `CardCodeFooterSection1`, identical to `Add`.
+- `AddByName(-1, "CardCode", ...)` (the raw field name) → `COMException: Database Field Not Found`.
+- `AddByName(-1, "{Command.no_such_field}", ...)` → the same `COMException: Database Field Not
+  Found`, naming neither the operation nor the field the caller wrote.
+
+`AddGroup` uses `FindFieldByFormulaForm` + `GroupController.Add` instead, because
+`FindFieldByFormulaForm` returns **null** for an unknown formula rather than throwing (measured),
+which lets the applier raise a message that names the field and points at `availableFields`.
+`AddByName` also demands a `CrDateConditionEnum` that is meaningless for a non-date field.
+
+### Neither operation needs the database
+
+`FindFieldByFormulaForm`, `GroupController`, `SortController` and `DataDefinition.Groups`/`Sorts`
+all read and write the report's own metadata. None of them walks
+`DatabaseController.Database.Tables` — the one call measured to *block* rather than fail when the
+database is unreachable (post-merge finding PM1) — which is why `AddGroup` resolves its field
+through `FindFieldByFormulaForm` rather than reusing `AddField`'s `ResolveDbField` walk. Grouping
+needs the field, not its value type.
