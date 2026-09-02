@@ -99,6 +99,28 @@ It 'adds a horizontal line' {
     $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
     $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyRule' }
     Should-Be $o.kind 'Line' 'kind'
+    # A bare Line adds without error but reads back width/height = 0 unless Right/Bottom are
+    # also set (docs/sdk-notes.md, "A bare Line or Box adds cleanly but reads back width = 0");
+    # this asserts the fix that closes that gap actually persists, not just that Add succeeded.
+    Should-Be $o.leftTwips 0 'left'
+    Should-Be $o.topTwips 500 'top'
+    Should-Be $o.widthTwips 5000 'width'
+    Should-Be $o.heightTwips 0 'height'
+}
+
+It 'adds a box with geometry that survives save and reopen' {
+    $a = Apply-Ops @(
+        @{ action='resizeSection'; section='DetailSection1'; heightTwips=1000 },
+        @{ action='addBox'; section='DetailSection1'; newName='VibeyBox'
+           leftTwips=100; topTwips=200; widthTwips=1500; heightTwips=600 }) 'addbox.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyBox' }
+    Should-Be $o.kind 'Box' 'kind'
+    Should-Be $o.leftTwips 100 'left'
+    Should-Be $o.topTwips 200 'top'
+    Should-Be $o.widthTwips 1500 'width'
+    Should-Be $o.heightTwips 600 'height'
 }
 
 It 'adds a page number special field as a Field object' {
@@ -111,6 +133,38 @@ It 'adds a page number special field as a Field object' {
     $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
     $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyPage' }
     Should-Be $o.kind 'Field' 'kind'
+}
+
+It 'binds every supported specialType to its correct FormulaForm, not just pageNOfM' {
+    # The task-5 review flagged that only pageNOfM had been cross-checked against the SDK's
+    # real FormulaForm string, and the brief's guessed CrSpecialFieldTypeEnum integers were
+    # ALL wrong but still legal enum members -- so a wrong-but-legal mapping would silently
+    # bind the wrong field and produce a report that renders perfectly with the wrong data in
+    # it. This proves all seven, not one, so a future refactor that flips two entries in the
+    # switch gets caught here instead of shipping quietly.
+    $expected = [ordered]@{
+        pageNumber     = 'PageNumber'
+        pageNOfM       = 'PageNofM'
+        totalPageCount = 'TotalPageCount'
+        printDate      = 'PrintDate'
+        printTime      = 'PrintTime'
+        reportTitle    = 'ReportTitle'
+        recordNumber   = 'RecordNumber'
+    }
+    $ops = @(@{ action='resizeSection'; section='DetailSection1'; heightTwips=2200 })
+    $top = 0
+    foreach ($type in $expected.Keys) {
+        $ops += @{ action='addSpecialField'; section='DetailSection1'; newName="Vibey$type"
+                   specialType=$type; leftTwips=0; topTwips=$top; widthTwips=2000; heightTwips=220 }
+        $top += 300
+    }
+    $a = Apply-Ops $ops 'specialfields.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    foreach ($type in $expected.Keys) {
+        $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq "Vibey$type" }
+        Should-Be $o.dataSource $expected[$type] "dataSource for specialType '$type'"
+    }
 }
 
 It 'removes an object and reports what it removed' {
