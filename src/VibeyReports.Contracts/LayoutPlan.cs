@@ -30,6 +30,8 @@ public static class LayoutActions
     public const string SetNumberFormat = "setNumberFormat";
     public const string SetCanGrow = "setCanGrow";
     public const string SetSuppress = "setSuppress";
+    public const string AddGroup = "addGroup";
+    public const string AddSort = "addSort";
 
     public static readonly string[] All =
     {
@@ -37,8 +39,28 @@ public static class LayoutActions
         SetAlignment, AddText, AddLine, AddBox, ResizeSection, AddField, RemoveObject,
         SetTextColor, SetFillColor, SetLineColor, SetSectionBackground, AddSubreport, SetSubreportLink,
         RemoveTable, AddTable, SetTableLocation,
-        SetSectionBreak, AddSpecialField, SetNumberFormat, SetCanGrow, SetSuppress
+        SetSectionBreak, AddSpecialField, SetNumberFormat, SetCanGrow, SetSuppress,
+        AddGroup, AddSort
     };
+}
+
+/// <summary>
+/// The <see cref="LayoutOperation.Direction"/> vocabulary accepted by
+/// <see cref="LayoutActions.AddGroup"/> and <see cref="LayoutActions.AddSort"/>, and the single
+/// place it is defined.
+///
+/// Deliberately only two members. CrSortDirectionEnum also carries crSortDirectionTopNOrder,
+/// BottomNOrder, TopNPercentage and BottomNPercentage, but every one of those needs an N that
+/// these operations have no field to express, so a "topN" that reached COM would either be
+/// rejected there or silently behave as something the caller did not ask for. The validator
+/// rejects them by name instead.
+/// </summary>
+public static class SortDirections
+{
+    public const string Ascending = "ascending";
+    public const string Descending = "descending";
+
+    public static readonly string[] All = { Ascending, Descending };
 }
 
 /// <summary>
@@ -111,8 +133,32 @@ public sealed class LayoutOperation
     /// <summary>
     /// Bindable field expression for addField, e.g. "{Command.stage_name}".
     /// Must exactly match a ReportSchema.AvailableFields[].FormulaForm.
+    ///
+    /// Also the field addGroup groups on and addSort sorts on. For those two the match is
+    /// case-insensitive and is skipped entirely when AvailableFields is empty, because
+    /// ReportReader clears that list whenever the data source cannot be enumerated -- unlike
+    /// addField, which binds NEW data and therefore fails closed on an empty allowlist.
     /// </summary>
     public string? FieldRef { get; set; }
+
+    /// <summary>
+    /// Sort order for addGroup (optional) and addSort (required). One of
+    /// <see cref="SortDirections.All"/>, matched case-insensitively.
+    /// </summary>
+    public string? Direction { get; set; }
+
+    /// <summary>
+    /// addGroup: 0-based position among the report's existing groups, outermost first. Optional;
+    /// omitted means append as the innermost group.
+    /// </summary>
+    public int? GroupIndex { get; set; }
+
+    /// <summary>
+    /// addSort: 0-based position among the report's existing sorts. Optional; omitted means
+    /// append. Note that every group contributes a sort of its own, so a report with two groups
+    /// already has two sorts before any addSort.
+    /// </summary>
+    public int? SortIndex { get; set; }
 
     /// <summary>Colour as "#RRGGBB", e.g. "#1F2A37". Required by the colour operations.</summary>
     public string? Color { get; set; }

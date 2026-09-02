@@ -76,9 +76,49 @@ public class LayoutPlanTests
             "setTextColor", "setFillColor", "setLineColor", "setSectionBackground",
             "addSubreport", "setSubreportLink",
             "removeTable", "addTable", "setTableLocation",
-            "setSectionBreak", "addSpecialField", "setNumberFormat", "setCanGrow", "setSuppress"
+            "setSectionBreak", "addSpecialField", "setNumberFormat", "setCanGrow", "setSuppress",
+            "addGroup", "addSort"
         });
-        LayoutActions.All.Should().HaveCount(26);
+        LayoutActions.All.Should().HaveCount(28);
+    }
+
+    [Fact]
+    public void SortDirections_All_ContainsEverySupportedDirectionAndNothingElse()
+    {
+        // Deliberately NOT the six CrSortDirectionEnum members: the four TopN variants each need
+        // an N that no operation field can carry, so they are not part of this contract.
+        SortDirections.All.Should().BeEquivalentTo(new[] { "ascending", "descending" });
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesTheGroupingFields()
+    {
+        const string json = """
+        {
+          "planVersion": 1,
+          "operations": [
+            { "action": "addGroup", "fieldRef": "{sp_x;1.emp_number}", "direction": "ascending",
+              "groupIndex": 0 },
+            { "action": "addSort", "fieldRef": "{sp_x;1.stage_period}", "direction": "descending",
+              "sortIndex": 1 }
+          ]
+        }
+        """;
+
+        var plan = JsonSerializer.Deserialize<LayoutPlan>(json, VibeyJson.Options)!;
+
+        plan.Operations[0].Action.Should().Be(LayoutActions.AddGroup);
+        plan.Operations[0].FieldRef.Should().Be("{sp_x;1.emp_number}");
+        plan.Operations[0].Direction.Should().Be("ascending");
+        plan.Operations[0].GroupIndex.Should().Be(0);
+        // Absent, not zero: an omitted index means "append", which is a different instruction
+        // from index 0, so the two must be distinguishable.
+        plan.Operations[0].SortIndex.Should().BeNull();
+
+        plan.Operations[1].Action.Should().Be(LayoutActions.AddSort);
+        plan.Operations[1].Direction.Should().Be("descending");
+        plan.Operations[1].SortIndex.Should().Be(1);
+        plan.Operations[1].GroupIndex.Should().BeNull();
     }
 
     [Fact]

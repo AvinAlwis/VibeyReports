@@ -9,6 +9,14 @@ public sealed class ReportSchema
     public List<SectionInfo> Sections { get; set; } = new List<SectionInfo>();
     /// <summary>Database fields the report's data source exposes. Used by addField as the allowed fieldRef set.</summary>
     public List<FieldInfo> AvailableFields { get; set; } = new List<FieldInfo>();
+    /// <summary>The report's groups, outermost first. Empty when the report has none. Set by addGroup.</summary>
+    public List<GroupInfo> Groups { get; set; } = new List<GroupInfo>();
+    /// <summary>
+    /// The report's record sort order. Set by addSort -- and by addGroup, which makes Crystal
+    /// create a sort of its own for the group's field (measured), so a grouped report has one
+    /// entry here per group before any addSort is issued.
+    /// </summary>
+    public List<SortInfo> Sorts { get; set; } = new List<SortInfo>();
 }
 
 public sealed class PageInfo
@@ -128,12 +136,91 @@ public sealed class NumberFormatInfo
     public bool SystemDefault { get; set; }
 }
 
+/// <summary>
+/// One group, as created by addGroup. Reports back exactly what addGroup writes -- the field and
+/// the direction -- plus the two things Crystal decides for itself and the caller cannot know
+/// otherwise: the names of the Group Header and Group Footer sections it created.
+/// </summary>
+public sealed class GroupInfo
+{
+    /// <summary>The grouped field in formula form, e.g. "{sp_perf_ind_perf_overview;1.emp_number}".</summary>
+    public string FieldRef { get; set; } = "";
+
+    /// <summary>
+    /// "ascending" or "descending". Read from the entry Crystal keeps in <see cref="ReportSchema.Sorts"/>
+    /// for this group's field -- ISCRGroupOptions carries no direction of its own (measured), so a
+    /// group's order genuinely IS a sort. Empty when no matching sort could be found.
+    /// </summary>
+    public string Direction { get; set; } = "";
+
+    /// <summary>
+    /// The name Crystal gave this group's Group Header section, e.g. "CardCodeHeaderSection1" --
+    /// the identifier addText/addField/resizeSection need. Null if the report somehow has fewer
+    /// group-header areas than groups. When a group area holds several sections, this is the first.
+    /// </summary>
+    public string? HeaderSection { get; set; }
+
+    /// <summary>The name Crystal gave this group's Group Footer section. See <see cref="HeaderSection"/>.</summary>
+    public string? FooterSection { get; set; }
+}
+
+/// <summary>
+/// One entry of the report's record sort order, as set by addSort -- or created by Crystal for a
+/// group (see <see cref="ReportSchema.Sorts"/>).
+/// </summary>
+public sealed class SortInfo
+{
+    /// <summary>The sorted field in formula form.</summary>
+    public string FieldRef { get; set; } = "";
+    /// <summary>"ascending" or "descending". A direction Crystal reports that this tool cannot set
+    /// (the four TopN variants) is reported verbatim as its Crystal enum name.</summary>
+    public string Direction { get; set; } = "";
+}
+
 /// <summary>One main-report-to-subreport field link, as set by setSubreportLink.</summary>
 public sealed class SubreportLinkInfo
 {
     public string MainReportFieldName { get; set; } = "";
     public string SubreportFieldName { get; set; } = "";
     public string LinkedParameterName { get; set; } = "";
+}
+
+/// <summary>
+/// How Crystal names the Group Header and Group Footer sections it creates for a group, derived
+/// from the grouped field. MEASURED against the installed 11.5 RAS, not assumed -- see
+/// docs/sdk-notes.md. Adding a group on "{Command.CardCode}" produces the area "CardCodeHeader"
+/// holding the section "CardCodeHeaderSection1" (and "CardCodeFooterSection1"); adding one on
+/// "{sp_perf_ind_perf_overview;1.overall_comment}" produces "overallcommentHeaderSection1" --
+/// note the UNDERSCORES ARE STRIPPED, which is exactly the sort of detail that makes guessing
+/// this rule instead of measuring it a mistake.
+///
+/// This lives in Contracts because <see cref="LayoutPlanValidator"/> needs it to register the new
+/// sections in its cumulative simulation, so that [addGroup, addText into the new group header]
+/// validates as one plan. The worker never uses it: ReportReader reports the names Crystal
+/// actually assigned, so the schema is always the truth and this is only ever a prediction.
+/// </summary>
+public static class GroupSectionNaming
+{
+    public static string HeaderSection(string? fieldRef) => Predict(fieldRef, "Header");
+    public static string FooterSection(string? fieldRef) => Predict(fieldRef, "Footer");
+
+    private static string Predict(string? fieldRef, string band)
+    {
+        var raw = (fieldRef ?? "").Trim();
+        if (raw.StartsWith("{")) raw = raw.Substring(1);
+        if (raw.EndsWith("}")) raw = raw.Substring(0, raw.Length - 1);
+
+        // "sp_perf_ind_perf_overview;1.overall_comment" -> "overall_comment". The table part can
+        // itself contain dots (catalog.schema.name), so the LAST dot is the separator.
+        var dot = raw.LastIndexOf('.');
+        if (dot >= 0 && dot < raw.Length - 1) raw = raw.Substring(dot + 1);
+
+        var name = new System.Text.StringBuilder(raw.Length);
+        foreach (var c in raw)
+            if (char.IsLetterOrDigit(c)) name.Append(c);
+
+        return name.ToString() + band + "Section1";
+    }
 }
 
 public sealed class FieldInfo

@@ -37,6 +37,24 @@ public static class LayoutPlanValidator
     private static readonly HashSet<string> SpecialTypes =
         new HashSet<string>(SpecialFieldTypes.All, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// addGroup/addSort's direction allowlist. Everything else -- including the four TopN
+    /// variants CrSortDirectionEnum also carries -- is rejected here by name, because neither
+    /// operation has a field that could express the N a TopN sort needs.
+    /// </summary>
+    private static readonly HashSet<string> Directions =
+        new HashSet<string>(SortDirections.All, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Measured: a Group Header / Group Footer section Crystal creates for a new group starts at
+    /// 250 twips, on every fixture tried. The simulation needs SOME height for the new sections so
+    /// that an addText into one in the same plan can be bounds-checked; getting it wrong can only
+    /// make the validator's bounds check slightly wrong (Crystal itself does not bounds-check an
+    /// added object against its section), never cause a mid-plan COM failure. Pair addGroup with a
+    /// resizeSection in the same plan to place taller content.
+    /// </summary>
+    private const int NewGroupSectionHeight = 250;
+
     public static ValidationResult Validate(LayoutPlan plan, ReportSchema schema)
     {
         var result = new ValidationResult { IsValid = true };
@@ -137,6 +155,13 @@ public static class LayoutPlanValidator
         var tablesKnown = tables.Count > 0;
         var removedTablesByPlan = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // The same "empty means unknown, not absent" reasoning as tablesKnown, captured BEFORE the
+        // loop so that a removeTable emptying the set part-way through does not silently turn
+        // addGroup/addSort's fieldRef check off for the rest of the plan.
+        var fieldRefsKnown = availableFieldRefs.Count > 0;
+
+        var groupsAndSorts = new GroupSortSim(schema);
+
         for (var i = 0; i < plan.Operations.Count; i++)
         {
             var op = plan.Operations[i];
@@ -149,7 +174,8 @@ public static class LayoutPlanValidator
             }
 
             var errors = ValidateOne(op, i, objects, subreportsByName, sectionHeights, printableWidth, printableHeight,
-                availableFieldRefs, removedByPlan, tables, tablesKnown, fieldRefsByTable, removedTablesByPlan);
+                availableFieldRefs, removedByPlan, tables, tablesKnown, fieldRefsByTable, removedTablesByPlan,
+                fieldRefsKnown, groupsAndSorts);
             result.Errors.AddRange(errors);
         }
 
@@ -168,7 +194,9 @@ public static class LayoutPlanValidator
         HashSet<string> tables,
         bool tablesKnown,
         Dictionary<string, List<string>> fieldRefsByTable,
-        HashSet<string> removedTablesByPlan)
+        HashSet<string> removedTablesByPlan,
+        bool fieldRefsKnown,
+        GroupSortSim groupsAndSorts)
     {
         var errs = new List<ValidationError>();
         void Err(string m) => errs.Add(new ValidationError { OperationIndex = index, Message = m });
@@ -270,6 +298,22 @@ public static class LayoutPlanValidator
         if (needsSection)
         {
             if (string.IsNullOrWhiteSpace(op.Section)) { Err($"\"{action}\" requires \"section\"."); return errs; }
+
+            // An addGroup earlier in this plan whose predicted section name COLLIDED with a
+            // section already in the report cannot be placed into safely: the name resolves to
+            // two different sections and there is no way to tell which one the caller meant.
+            // Rare (it needs two same-named fields from different tables, or a pre-existing
+            // group on the same field), but silently writing into the wrong section is the one
+            // outcome worth refusing outright.
+            if (groupsAndSorts.AmbiguousSections.Contains(op.Section!))
+            {
+                Err($"Section \"{op.Section}\" is ambiguous: an addGroup earlier in this plan creates a " +
+                    "section whose name collides with one already in the report, so this plan cannot say " +
+                    "which is meant. Run this plan without the placement, then read_report and place into " +
+                    "the real section name in a second plan.");
+                return errs;
+            }
+
             if (!sectionHeights.ContainsKey(op.Section!))
             {
                 Err($"Section \"{op.Section}\" does not exist in the report.");
@@ -442,6 +486,72 @@ public static class LayoutPlanValidator
                 // required value itself is left.
                 if (op.Suppress is null) Err("\"setSuppress\" requires \"suppress\".");
                 break;
+
+            case LayoutActions.AddGroup:
+            case LayoutActions.AddSort:
+            {
+                // Neither joins needsTarget nor needsSection: they address a FIELD, not a report
+                // object and not a section. addGroup CREATES sections rather than placing into one.
+                if (string.IsNullOrWhiteSpace(op.FieldRef))
+                { Err($"\"{action}\" requires \"fieldRef\"."); return errs; }
+
+                if (action == LayoutActions.AddSort && string.IsNullOrWhiteSpace(op.Direction))
+                { Err("\"addSort\" requires \"direction\" (\"ascending\" or \"descending\")."); return errs; }
+
+                if (!string.IsNullOrWhiteSpace(op.Direction) && !Directions.Contains(op.Direction!))
+                {
+                    Err($"\"{op.Direction}\" is not a supported direction; use \"ascending\" or \"descending\". " +
+                        "Crystal's topN, bottomN, topNPercentage and bottomNPercentage orders are deliberately " +
+                        "NOT supported: each needs an N that this operation has no field to express.");
+                    return errs;
+                }
+
+                // Skipped entirely when the field list is unknown -- ReportReader CLEARS
+                // AvailableFields whenever the data source cannot be enumerated (no database
+                // connection), which is a normal supported state, and rejecting on an empty list
+                // would break both operations whenever the VPN is down. Same trap removeTable's
+                // existence check and setNumberFormat's missing type check already sidestep.
+                // Unlike addField this is not a security boundary: neither operation binds new
+                // data into the report, so there is nothing to fail closed about.
+                if (fieldRefsKnown && !availableFieldRefs.Contains(op.FieldRef!))
+                {
+                    Err($"\"{op.FieldRef}\" is not a field in this report's data source. " +
+                        "Use one of the formulaForm values from the report schema's availableFields.");
+                    return errs;
+                }
+
+                if (action == LayoutActions.AddGroup)
+                {
+                    // Measured: Crystal answers a second group on an already-grouped field with
+                    // COMException "The grouping already exists." Catch it here, where nothing has
+                    // been written yet, rather than mid-plan.
+                    if (groupsAndSorts.GroupFields.Contains(op.FieldRef!))
+                    {
+                        Err($"This report is already grouped on \"{op.FieldRef}\". Crystal refuses a second " +
+                            "group on the same field (\"The grouping already exists.\").");
+                        return errs;
+                    }
+                    if (!CheckIndex(op.GroupIndex, groupsAndSorts.GroupCount, "groupIndex", "groups", Err)) return errs;
+                    groupsAndSorts.AddGroup(op.GroupIndex, op.FieldRef!, sectionHeights, NewGroupSectionHeight);
+                }
+                else
+                {
+                    // Measured: a second sort on an already-sorted field is COMException "The
+                    // sorting already exists". Every group carries a sort of its own, so this also
+                    // covers addSort against a field the report (or this plan) groups on.
+                    if (groupsAndSorts.SortFields.Contains(op.FieldRef!))
+                    {
+                        Err($"This report is already sorted on \"{op.FieldRef}\", and Crystal refuses a second " +
+                            "sort on the same field (\"The sorting already exists\"). Note that every group " +
+                            "carries a sort on its own field, so a grouped field is already sorted; use " +
+                            "addGroup's \"direction\" to choose a group's order.");
+                        return errs;
+                    }
+                    if (!CheckIndex(op.SortIndex, groupsAndSorts.SortCount, "sortIndex", "sorts", Err)) return errs;
+                    groupsAndSorts.AddSort(op.SortIndex, op.FieldRef!);
+                }
+                break;
+            }
 
             case LayoutActions.AddText:
             case LayoutActions.AddLine:
@@ -760,6 +870,100 @@ public static class LayoutPlanValidator
         err($"\"{action}\": no table with the alias \"{alias}\" is in this report's data source. " +
             $"Known aliases: {string.Join(", ", Sorted(tables))}.");
         return false;
+    }
+
+    /// <summary>
+    /// Bounds check for addGroup's groupIndex / addSort's sortIndex: 0-based, and equal to the
+    /// current count means "append", so the count itself is legal. Counted against the CUMULATIVE
+    /// simulation, so two addGroups in one plan index correctly. Returns false when an error was
+    /// reported.
+    /// </summary>
+    private static bool CheckIndex(int? index, int count, string field, string what, Action<string> err)
+    {
+        if (index is null) return true;
+        if (index.Value < 0) { err($"\"{field}\" must not be negative; got {index.Value}."); return false; }
+        if (index.Value > count)
+        {
+            err($"\"{field}\" {index.Value} is past the end: this report has {count} {what}, so the " +
+                $"largest accepted value is {count} (which appends).");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The group and sort name-spaces, simulated cumulatively alongside the object, section and
+    /// table ones. Groups and sorts are keyed by the FIELD they act on, which is a fourth
+    /// name-space again -- Crystal identifies a group by its condition field, not by a name.
+    /// </summary>
+    private sealed class GroupSortSim
+    {
+        private readonly List<string> _groups = new List<string>();
+        private readonly List<string> _sorts = new List<string>();
+
+        public HashSet<string> GroupFields { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> SortFields { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Predicted group-section names that collided with a section already in the report, and
+        /// so cannot be placed into by this plan. See the needsSection block.
+        /// </summary>
+        public HashSet<string> AmbiguousSections { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public GroupSortSim(ReportSchema schema)
+        {
+            foreach (var g in schema.Groups ?? new List<GroupInfo>())
+            {
+                if (g == null || string.IsNullOrWhiteSpace(g.FieldRef)) continue;
+                _groups.Add(g.FieldRef);
+                GroupFields.Add(g.FieldRef);
+            }
+            foreach (var s in schema.Sorts ?? new List<SortInfo>())
+            {
+                if (s == null || string.IsNullOrWhiteSpace(s.FieldRef)) continue;
+                _sorts.Add(s.FieldRef);
+                SortFields.Add(s.FieldRef);
+            }
+        }
+
+        public int GroupCount => _groups.Count;
+        public int SortCount => _sorts.Count;
+
+        public void AddGroup(int? index, string fieldRef, Dictionary<string, int> sectionHeights, int newHeight)
+        {
+            Insert(_groups, index, fieldRef);
+            GroupFields.Add(fieldRef);
+
+            // Measured: GroupController.Add creates a sort for the group's field at the same
+            // time -- unless the field already carried one, which it then adopts (keeping that
+            // sort's existing direction). Either way the field is sorted afterwards, which is
+            // what a later addSort on it has to be judged against.
+            if (SortFields.Add(fieldRef)) Insert(_sorts, index, fieldRef);
+
+            // THE reason this simulation exists: registering the sections Crystal will create
+            // means [addGroup, addText into the new group header] validates as ONE plan. The
+            // names are predicted, never invented -- GroupSectionNaming carries the measured rule.
+            RegisterSection(GroupSectionNaming.HeaderSection(fieldRef), sectionHeights, newHeight);
+            RegisterSection(GroupSectionNaming.FooterSection(fieldRef), sectionHeights, newHeight);
+        }
+
+        public void AddSort(int? index, string fieldRef)
+        {
+            Insert(_sorts, index, fieldRef);
+            SortFields.Add(fieldRef);
+        }
+
+        private void RegisterSection(string name, Dictionary<string, int> sectionHeights, int newHeight)
+        {
+            if (sectionHeights.ContainsKey(name)) AmbiguousSections.Add(name);
+            else sectionHeights[name] = newHeight;
+        }
+
+        private static void Insert(List<string> list, int? index, string value)
+        {
+            if (index.HasValue && index.Value >= 0 && index.Value <= list.Count) list.Insert(index.Value, value);
+            else list.Add(value);
+        }
     }
 
     private static IEnumerable<string> Sorted(HashSet<string> values)

@@ -37,6 +37,10 @@ public sealed class ReportTools
         availableFields: the database fields the report's data source exposes, each with a
         formulaForm you can pass as fieldRef to apply_layout's addField action. Object and
         section names in this result are the identifiers you must use in a layout plan.
+        Also returns groups (each with fieldRef, direction, and the headerSection/footerSection
+        names Crystal assigned to that group's two sections - use those names to place objects into
+        a group band) and sorts (the record sort order, fieldRef plus direction). A grouped report
+        always lists one sort per group, because a group's order IS a sort in Crystal.
         1440 twips = 1 inch.
         """)]
     public async Task<string> ReadReport(
@@ -94,6 +98,10 @@ public sealed class ReportTools
           setCanGrow        target (Text or Field), canGrow
           setSuppress       suppress, plus EXACTLY ONE of target (any object) or section;
                             suppressIfBlank is optional and valid only with section
+          addGroup          fieldRef, and optionally direction (ascending | descending) and
+                            groupIndex (0-based, outermost first; omitted appends)
+          addSort           fieldRef, direction (ascending | descending), and optionally
+                            sortIndex (0-based; omitted appends)
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
@@ -196,9 +204,28 @@ public sealed class ReportTools
         A newly added text or field object inherits the font of existing objects already in its
         target section (falling back to Arial 10pt if the section has none), so a follow-up
         setFont is only needed when you want a different font from the section's existing style.
+        addGroup is the ONLY action that creates sections. Crystal's band structure is otherwise
+        fixed, so a page that must repeat once per employee cannot live in the Report Header (which
+        prints once for the whole report) - group the report on the employee's field and that
+        content becomes a Group Header, which repeats per group. addGroup creates a Group Header and
+        a Group Footer section and CRYSTAL NAMES THEM: the name is the field's own name with every
+        non-alphanumeric character removed, plus "HeaderSection1" / "FooterSection1", so a group on
+        "{sp_perf_ind_perf_overview;1.emp_number}" gives "empnumberHeaderSection1" and
+        "empnumberFooterSection1" - note the underscores are dropped. You may place objects into
+        those names in the SAME plan as the addGroup that creates them. They start 250 twips tall,
+        so pair the addGroup with a resizeSection when the content needs more room. read_report
+        reports each group's real headerSection/footerSection, so you never have to rely on the
+        rule above.
+        addSort makes the record order a property of the report instead of leaving it to whatever
+        order the database happens to return. Only ascending and descending are supported; Crystal's
+        TopN/BottomN orders are rejected. Every group carries a sort on its own field, so a grouped
+        field is ALREADY sorted - use addGroup's own direction to change a group's order, and expect
+        addSort on that field to be rejected. Crystal refuses a second group or a second sort on the
+        same field, and this tool rejects both before writing anything.
+        Groups and sorts read back through read_report as "groups" and "sorts".
         All coordinates are twips (1440 = 1 inch).
-        Layout only: database connections, SQL, formulas, parameters, record selection and
-        grouping cannot be changed and any attempt is rejected. The whole plan is validated
+        Layout only: database connections, SQL, formulas, parameters and record selection cannot be
+        changed and any attempt is rejected. The whole plan is validated
         before anything is written, so a rejected plan leaves no output file behind.
         On success the result includes the refreshed schema, so you do not need a follow-up
         read_report to see the new object names, positions or section heights.

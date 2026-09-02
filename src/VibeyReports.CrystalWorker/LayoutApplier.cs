@@ -235,6 +235,14 @@ namespace VibeyReports.CrystalWorker
                                     RequireObjectFormat(o, LayoutActions.SetSuppress).EnableSuppress = op.Suppress.Value);
                             break;
 
+                        case LayoutActions.AddGroup:
+                            AddGroup(doc, op);
+                            break;
+
+                        case LayoutActions.AddSort:
+                            AddSort(doc, op);
+                            break;
+
                         default:
                             throw new InvalidOperationException($"Unhandled action \"{op.Action}\" reached the applier; the validator should have rejected it.");
                     }
@@ -880,6 +888,162 @@ namespace VibeyReports.CrystalWorker
                 default:
                     throw new InvalidOperationException(
                         $"Unsupported specialType \"{specialType}\"; the validator should have rejected it.");
+            }
+        }
+
+        /// <summary>
+        /// Adds a group on an existing field, which is the ONLY way this tool can create a section:
+        /// ISCRReportDefController's whole Add/Modify/Remove surface is for chart objects, so a
+        /// report's band structure is otherwise fixed (measured, docs/sdk-notes.md). Crystal creates
+        /// a Group Header and a Group Footer area for the new group and names both itself.
+        ///
+        /// The field is resolved explicitly through FindFieldByFormulaForm rather than going through
+        /// GroupController.AddByName, so an unknown fieldRef fails here with a message naming it
+        /// instead of inside COM. See the report for the AddByName comparison.
+        /// </summary>
+        private static void AddGroup(
+            ISCDReportClientDocument doc,
+            LayoutOperation op)
+        {
+            var field = ResolveGroupableField(doc, op.FieldRef, LayoutActions.AddGroup);
+
+            var group = new GroupClass { ConditionField = field };
+
+            // -1 appends. GroupController.Add's index is 0-based and outermost-first, matching
+            // DataDefinition.Groups (measured: inserting at 0 puts the new group's header area
+            // ABOVE the existing one and its footer area BELOW, i.e. it becomes the outer group).
+            var index = op.GroupIndex ?? -1;
+
+            try
+            {
+                doc.DataDefController.GroupController.Add(index, group);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"addGroup\" on \"{op.FieldRef}\": {ex.Message.Trim()}", ex);
+            }
+
+            // Measured: ISCRGroupOptions carries NO direction -- a group's order genuinely is a
+            // sort, and GroupController.Add creates one on the group's field for us (ascending),
+            // or adopts an existing sort on that field and keeps its direction. So a direction is
+            // applied by modifying that sort, and is only touched when the caller asked for one:
+            // an addGroup with no direction must not silently flip an order the report already had.
+            if (!string.IsNullOrWhiteSpace(op.Direction))
+                SetSortDirectionFor(doc, op.FieldRef, ParseDirection(op.Direction), LayoutActions.AddGroup);
+        }
+
+        /// <summary>
+        /// Adds a record sort. Crystal refuses a second sort on a field that already carries one
+        /// ("The sorting already exists" -- measured), and every group carries a sort on its own
+        /// field, so the validator rejects both cases before anything is written; the COMException
+        /// wrapper here is for whatever it did not foresee.
+        /// </summary>
+        private static void AddSort(
+            ISCDReportClientDocument doc,
+            LayoutOperation op)
+        {
+            var field = ResolveGroupableField(doc, op.FieldRef, LayoutActions.AddSort);
+
+            var sort = new SortClass
+            {
+                SortField = field,
+                Direction = ParseDirection(op.Direction)
+            };
+
+            try
+            {
+                doc.DataDefController.SortController.Add(op.SortIndex ?? -1, sort);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"addSort\" on \"{op.FieldRef}\": {ex.Message.Trim()}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Resolves a fieldRef to the report's own ISCRField. Deliberately does NOT walk
+        /// DatabaseController.Database.Tables the way AddField's ResolveDbField does: that walk is
+        /// the one Crystal call measured to BLOCK rather than fail when the database is unreachable
+        /// (post-merge finding PM1), and grouping needs no value type, only the field itself.
+        /// </summary>
+        private static ISCRField ResolveGroupableField(
+            ISCDReportClientDocument doc,
+            string fieldRef,
+            string action)
+        {
+            object raw;
+            try
+            {
+                raw = doc.DataDefController.FindFieldByFormulaForm(fieldRef);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal could not resolve the field \"{fieldRef}\" for \"{action}\": {ex.Message.Trim()}", ex);
+            }
+
+            if (raw == null)
+                throw new InvalidOperationException(
+                    $"\"{action}\" could not resolve the field \"{fieldRef}\" in this report. Use one of the " +
+                    "formulaForm values read_report lists under availableFields.");
+
+            return (ISCRField)raw;
+        }
+
+        /// <summary>
+        /// Points the sort that exists for <paramref name="fieldRef"/> at a direction.
+        /// SortController.ModifySortDirection takes the live sort object, so the sort is located by
+        /// walking DataDefinition.Sorts and matching on FormulaForm rather than trusting
+        /// FindSort to match a field instance we constructed elsewhere.
+        /// </summary>
+        private static void SetSortDirectionFor(
+            ISCDReportClientDocument doc,
+            string fieldRef,
+            CrSortDirectionEnum direction,
+            string action)
+        {
+            var sorts = doc.DataDefController.DataDefinition.Sorts;
+            for (var i = 0; i < sorts.Count; i++)
+            {
+                var sort = (ISCRSort)sorts[i];
+                if (sort.SortField == null ||
+                    !string.Equals(sort.SortField.FormulaForm, fieldRef, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    doc.DataDefController.SortController.ModifySortDirection(sort, direction);
+                }
+                catch (COMException ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Crystal rejected the sort direction for \"{action}\" on \"{fieldRef}\": {ex.Message.Trim()}", ex);
+                }
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"\"{action}\" added a group on \"{fieldRef}\" but Crystal created no sort for it, so the " +
+                "requested direction could not be applied.");
+        }
+
+        /// <summary>
+        /// The validator's allowlist (SortDirections.All) is the contract and is checked before
+        /// anything reaches here, so an unrecognised value at this point is a bug, not caller
+        /// input -- reported the same way ParseAlignment and ParseSpecialType report one. The four
+        /// TopN variants are deliberately unreachable: none can be expressed without an N.
+        /// </summary>
+        private static CrSortDirectionEnum ParseDirection(string direction)
+        {
+            switch ((direction ?? "").ToUpperInvariant())
+            {
+                case "ASCENDING": return CrSortDirectionEnum.crSortDirectionAscendingOrder;
+                case "DESCENDING": return CrSortDirectionEnum.crSortDirectionDescendingOrder;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported direction \"{direction}\"; the validator should have rejected it.");
             }
         }
 

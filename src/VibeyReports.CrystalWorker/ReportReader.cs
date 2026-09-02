@@ -43,12 +43,28 @@ namespace VibeyReports.CrystalWorker
 
             // VERIFIED: ISCRReportDefinition has NO `Sections` property. Sections live on Areas,
             // and ISCRArea.Kind carries the band. Walk Areas, not Sections.
+            // Group header/footer SECTION names in document order, collected here so GroupInfo can
+            // report the names Crystal chose for each group's two sections. Crystal names them
+            // itself and there is no property on ISCRGroup pointing at them, so the mapping is by
+            // position: headers appear in group order, footers in REVERSE group order (measured --
+            // group 0 is the outermost, so its footer prints last).
+            var groupHeaderSections = new List<string>();
+            var groupFooterSections = new List<string>();
+
             var areas = doc.ReportDefController.ReportDefinition.Areas;
             for (var a = 0; a < areas.Count; a++)
             {
                 var area = areas[a];
                 var band = ClassifyArea(area.Kind);
                 var sections = area.Sections;
+
+                if (sections.Count > 0)
+                {
+                    // A group area can hold several sections (Group Header a, b, c); the first is
+                    // the one a caller means by "the group header".
+                    if (band == "GroupHeader") groupHeaderSections.Add(sections[0].Name);
+                    else if (band == "GroupFooter") groupFooterSections.Add(sections[0].Name);
+                }
 
                 for (var i = 0; i < sections.Count; i++)
                 {
@@ -78,6 +94,8 @@ namespace VibeyReports.CrystalWorker
                     schema.Sections.Add(info);
                 }
             }
+
+            ReadGroupsAndSorts(doc, schema, groupHeaderSections, groupFooterSections);
 
             // Field enumeration must never require a live database connection. If the report's
             // data source needs a logon (or anything else goes wrong), leave AvailableFields empty
@@ -112,6 +130,98 @@ namespace VibeyReports.CrystalWorker
             }
 
             return schema;
+        }
+
+        /// <summary>
+        /// Reads back exactly what addGroup and addSort write, so neither is write-only: the field
+        /// and the direction for both, plus -- for a group -- the two section names Crystal chose,
+        /// which the caller has no other way to learn and needs in order to place anything into the
+        /// new band.
+        ///
+        /// A group's direction is NOT a property of the group: measured, ISCRGroupOptions carries
+        /// no direction at all, and GroupController.Add creates an entry in DataDefinition.Sorts
+        /// for the grouped field instead. So Sorts is read first and the group's direction is taken
+        /// from the entry on its own field. That also means Sorts legitimately reports one entry
+        /// per group before any addSort has been issued, which is the truth about the report rather
+        /// than an artefact of this reader.
+        ///
+        /// Wrapped defensively, like the AvailableFields walk and ReadSubreportLinks: a report with
+        /// no groups must read back as empty lists, never as a failed read.
+        /// </summary>
+        private static void ReadGroupsAndSorts(
+            ISCDReportClientDocument doc,
+            ReportSchema schema,
+            List<string> groupHeaderSections,
+            List<string> groupFooterSections)
+        {
+            try
+            {
+                var dataDefinition = doc.DataDefController.DataDefinition;
+
+                var sorts = dataDefinition.Sorts;
+                for (var i = 0; i < sorts.Count; i++)
+                {
+                    var sort = (ISCRSort)sorts[i];
+                    schema.Sorts.Add(new SortInfo
+                    {
+                        FieldRef = sort.SortField == null ? "" : (sort.SortField.FormulaForm ?? ""),
+                        Direction = ClassifySortDirection(sort.Direction)
+                    });
+                }
+
+                var groups = dataDefinition.Groups;
+                for (var g = 0; g < groups.Count; g++)
+                {
+                    var group = (ISCRGroup)groups[g];
+                    var fieldRef = group.ConditionField == null ? "" : (group.ConditionField.FormulaForm ?? "");
+
+                    schema.Groups.Add(new GroupInfo
+                    {
+                        FieldRef = fieldRef,
+                        Direction = DirectionOfSortOn(schema.Sorts, fieldRef),
+                        // Only claim a section name when the counts line up exactly. A report whose
+                        // group areas and groups disagree is not one this positional mapping can
+                        // describe, and a wrong name here is worse than none: it is the name the
+                        // caller would then place objects into.
+                        HeaderSection = groupHeaderSections.Count == groups.Count ? groupHeaderSections[g] : null,
+                        FooterSection = groupFooterSections.Count == groups.Count
+                            ? groupFooterSections[groups.Count - 1 - g]
+                            : null
+                    });
+                }
+            }
+            catch
+            {
+                // Deliberately bare, matching the AvailableFields walk: a report whose group or
+                // sort definitions cannot be read must still read back as a report.
+                schema.Groups.Clear();
+                schema.Sorts.Clear();
+            }
+        }
+
+        private static string DirectionOfSortOn(List<SortInfo> sorts, string fieldRef)
+        {
+            if (string.IsNullOrEmpty(fieldRef)) return "";
+            foreach (var sort in sorts)
+                if (string.Equals(sort.FieldRef, fieldRef, StringComparison.OrdinalIgnoreCase))
+                    return sort.Direction;
+            return "";
+        }
+
+        /// <summary>
+        /// Maps CrSortDirectionEnum onto the two-value vocabulary addGroup/addSort accept. The four
+        /// TopN variants cannot be SET by this tool (they need an N no operation can express), but a
+        /// report edited elsewhere may well carry one, so those are reported verbatim under their
+        /// Crystal enum name rather than being flattened into a wrong "ascending".
+        /// </summary>
+        private static string ClassifySortDirection(CrSortDirectionEnum direction)
+        {
+            switch (direction)
+            {
+                case CrSortDirectionEnum.crSortDirectionAscendingOrder: return SortDirections.Ascending;
+                case CrSortDirectionEnum.crSortDirectionDescendingOrder: return SortDirections.Descending;
+                default: return direction.ToString();
+            }
         }
 
         private static ObjectInfo ReadObject(ISCDReportClientDocument doc, ISCRReportObject ro)

@@ -2170,6 +2170,445 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeFalse();
         result.Errors.Should().ContainSingle().Which.Message.Should().Contain("does not exist");
     }
+
+    // ---- addGroup / addSort ------------------------------------------------
+
+    /// <summary>
+    /// Schema() plus a group that already exists, shaped exactly as ReportReader emits one: the
+    /// group's own sort is in Sorts (Crystal creates one per group -- measured), and the two
+    /// sections it created are in Sections under the names Crystal assigned.
+    /// </summary>
+    private static ReportSchema SchemaWithAGroup()
+    {
+        var schema = Schema();
+        schema.Groups.Add(new GroupInfo
+        {
+            FieldRef = "{Command.stage_name}", Direction = SortDirections.Ascending,
+            HeaderSection = "stagenameHeaderSection1", FooterSection = "stagenameFooterSection1"
+        });
+        schema.Sorts.Add(new SortInfo { FieldRef = "{Command.stage_name}", Direction = SortDirections.Ascending });
+        schema.Sections.Add(new SectionInfo { Name = "stagenameHeaderSection1", Kind = "GroupHeader", HeightTwips = 250 });
+        schema.Sections.Add(new SectionInfo { Name = "stagenameFooterSection1", Kind = "GroupFooter", HeightTwips = 250 });
+        return schema;
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddGroupOnAnAvailableField()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddGroupWithoutAFieldRef()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.AddGroup });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"fieldRef\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddGroupOnAFieldThatIsNotInTheDataSource()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.not_a_field}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("availableFields");
+    }
+
+    [Theory]
+    [InlineData(SortDirections.Ascending)]
+    [InlineData(SortDirections.Descending)]
+    [InlineData("DESCENDING")]
+    public void Validate_AcceptsAddSortInEitherDirection(string direction)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}", Direction = direction
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSortWithoutADirection()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"direction\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsAnUnknownSortDirection()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}", Direction = "sideways"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("not a supported direction");
+    }
+
+    /// <summary>
+    /// topN is called out on its own because it is the plausible one: it is a real
+    /// CrSortDirectionEnum member, so an agent that has seen the Crystal API could reasonably try
+    /// it. It must be a plan error, not a COM failure -- and not a silent pass-through, since
+    /// neither operation has any field that could carry the N a TopN sort needs.
+    /// </summary>
+    [Theory]
+    [InlineData("topN")]
+    [InlineData("bottomN")]
+    [InlineData("topNPercentage")]
+    public void Validate_RejectsTheTopNSortDirections(string direction)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}", Direction = direction
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("no field to express");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddGroupWithAnUnsupportedDirection()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}", Direction = "topN"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("not a supported direction");
+    }
+
+    /// <summary>
+    /// ReportReader CLEARS AvailableFields whenever the report's data source cannot be enumerated,
+    /// which is normal with no database connection. Both operations must still work then -- the
+    /// trap removeTable's existence check and setNumberFormat's missing type check already
+    /// sidestep. Note this is NOT addField's rule: addField binds new data and fails closed.
+    /// </summary>
+    [Fact]
+    public void Validate_SkipsTheFieldCheckEntirelyWhenAvailableFieldsIsEmpty()
+    {
+        var schema = Schema();
+        schema.AvailableFields.Clear();
+
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Whatever.field}" },
+            new LayoutOperation { Action = LayoutActions.AddSort, FieldRef = "{Whatever.other}", Direction = SortDirections.Descending });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public void Validate_RejectsAnOutOfRangeGroupIndex(int groupIndex)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}", GroupIndex = groupIndex
+        });
+
+        // Schema() has no groups, so 0 is the only accepted index.
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("groupIndex");
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public void Validate_RejectsAnOutOfRangeSortIndex(int sortIndex)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}",
+            Direction = SortDirections.Ascending, SortIndex = sortIndex
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("sortIndex");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAGroupIndexEqualToTheGroupCountBecauseThatAppends()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}", GroupIndex = 0
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// The cumulative-simulation test the brief calls for: the second addGroup must be judged
+    /// against a report that already has ONE group, so groupIndex 1 is legal for it while it was
+    /// illegal for the first. A validator that re-read the schema per operation would reject this.
+    /// </summary>
+    [Fact]
+    public void Validate_IndexesASecondAddGroupAgainstTheFirstOne()
+    {
+        var schema = Schema();
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "stage_status", FormulaForm = "{Command.stage_status}",
+            TableAlias = "Command", ValueType = "String", HeadingText = "Stage Status"
+        });
+
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}", GroupIndex = 0 },
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_status}", GroupIndex = 1 });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsASecondGroupOnAFieldTheReportAlreadyGroupsOn()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithAGroup());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already grouped");
+    }
+
+    [Fact]
+    public void Validate_RejectsASecondGroupOnAFieldGroupedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already grouped");
+    }
+
+    /// <summary>
+    /// A grouped field is already sorted, because Crystal creates the group's sort itself
+    /// (measured). Without this rule the plan would validate and then fail at COM with "The
+    /// sorting already exists", mid-plan, faulting the session.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsAddSortOnAFieldAGroupEarlierInThePlanAlreadySorts()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}",
+                Direction = SortDirections.Descending
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already sorted");
+    }
+
+    [Fact]
+    public void Validate_RejectsAddSortOnAFieldTheReportAlreadySorts()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddSort, FieldRef = "{Command.stage_name}",
+            Direction = SortDirections.Descending
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithAGroup());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("already sorted");
+    }
+
+    /// <summary>
+    /// The good half of the in-plan section rule, and the reason the naming was measured rather
+    /// than guessed: because Crystal's naming is deterministic, an addGroup and a placement into
+    /// the section it creates validate as ONE plan.
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsPlacingIntoAGroupHeaderCreatedEarlierInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "stagenameHeaderSection1", NewName = "GroupTitle",
+                Text = "Stage", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 200
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "stagenameFooterSection1", NewName = "GroupTotalLabel",
+                Text = "Total", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 200
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// The other half: a section that does NOT exist and is not created by this plan is still
+    /// rejected, so the rule above is a prediction of a real name rather than a hole that accepts
+    /// any unknown section name after an addGroup.
+    /// </summary>
+    [Fact]
+    public void Validate_StillRejectsAnUnrelatedUnknownSectionAfterAnAddGroup()
+    {
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "stage_nameHeaderSection1", NewName = "GroupTitle",
+                Text = "Stage", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 200
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("does not exist");
+    }
+
+    /// <summary>
+    /// The new group sections are registered 250 twips tall (measured), so an object taller than
+    /// that is clipped -- and a resizeSection in the same plan is the documented way to make room.
+    /// </summary>
+    [Fact]
+    public void Validate_LetsAResizeSectionInTheSamePlanMakeRoomInANewGroupHeader()
+    {
+        var tooTall = new LayoutOperation
+        {
+            Action = LayoutActions.AddText, Section = "stagenameHeaderSection1", NewName = "GroupTitle",
+            Text = "Stage", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 900
+        };
+
+        var withoutRoom = LayoutPlanValidator.Validate(
+            PlanOf(new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" }, tooTall),
+            Schema());
+
+        withoutRoom.IsValid.Should().BeFalse();
+        withoutRoom.Errors.Should().ContainSingle().Which.Message.Should().Contain("past the height of section");
+
+        var withRoom = LayoutPlanValidator.Validate(
+            PlanOf(
+                new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+                new LayoutOperation { Action = LayoutActions.ResizeSection, Section = "stagenameHeaderSection1", HeightTwips = 1000 },
+                tooTall),
+            Schema());
+
+        withRoom.IsValid.Should().BeTrue(because: string.Join("; ", withRoom.Errors.ConvertAll(e => e.Message)));
+    }
+
+    /// <summary>
+    /// The collision guard. If the predicted name is already a real section, the plan cannot say
+    /// which section it means, and writing into the wrong one silently is the one outcome worth
+    /// refusing outright.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsPlacingIntoAPredictedGroupSectionNameThatAlreadyExists()
+    {
+        var schema = Schema();
+        schema.Sections.Add(new SectionInfo { Name = "stagenameHeaderSection1", Kind = "GroupHeader", HeightTwips = 250 });
+
+        var plan = PlanOf(
+            new LayoutOperation { Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_name}" },
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddText, Section = "stagenameHeaderSection1", NewName = "GroupTitle",
+                Text = "Stage", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 200
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("ambiguous");
+    }
+
+    [Fact]
+    public void Validate_AcceptsAddGroupAgainstAReportThatAlreadyGroupsOnADifferentField()
+    {
+        var schema = SchemaWithAGroup();
+        schema.AvailableFields.Add(new FieldInfo
+        {
+            Name = "stage_status", FormulaForm = "{Command.stage_status}",
+            TableAlias = "Command", ValueType = "String", HeadingText = "Stage Status"
+        });
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.AddGroup, FieldRef = "{Command.stage_status}", GroupIndex = 1,
+            Direction = SortDirections.Descending
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+}
+
+public class GroupSectionNamingTests
+{
+    /// <summary>
+    /// The measured rule, pinned. "overall_comment" becoming "overallcomment" is the whole reason
+    /// this could not be guessed: the obvious prediction keeps the underscore, and a validator
+    /// registering "overall_commentHeaderSection1" would have validated plans that then threw
+    /// mid-apply.
+    /// </summary>
+    [Theory]
+    [InlineData("{Command.CardCode}", "CardCodeHeaderSection1", "CardCodeFooterSection1")]
+    [InlineData("{sp_perf_ind_perf_overview;1.overall_comment}", "overallcommentHeaderSection1", "overallcommentFooterSection1")]
+    [InlineData("{sp_x;1.emp_number}", "empnumberHeaderSection1", "empnumberFooterSection1")]
+    public void Predicts(string fieldRef, string header, string footer)
+    {
+        GroupSectionNaming.HeaderSection(fieldRef).Should().Be(header);
+        GroupSectionNaming.FooterSection(fieldRef).Should().Be(footer);
+    }
 }
 
 internal static class PlanExtensions
