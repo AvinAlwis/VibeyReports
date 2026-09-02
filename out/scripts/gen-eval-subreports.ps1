@@ -121,25 +121,30 @@ foreach ($rep in $reports) {
   }
 
   # ---- Details: one bound row --------------------------------------------------
+  #
+  # THE ROW IS RULED BY THE CELLS' OWN BORDERS, NOT BY DRAWN LINES.
+  #
+  # This row grows: the comment columns are NVARCHAR(2000) and setCanGrow lets a
+  # cell expand to several times $rowH. A Line has no can-grow, so the divider and
+  # rule this used to draw stayed at the original height while the text ran on past
+  # them, and the table looked like it was leaking out of its own ruling.
+  # A border belongs to the object, so it grows with it.
+  #
+  # Consequence: each cell now spans its WHOLE column (x .. x+w) instead of sitting
+  # inset by 70 twips. Inset cells would leave a 140-twip gap between neighbouring
+  # borders, which reads as separate boxes rather than a table. The trade is that
+  # text starts hard against the left border - Crystal fields have no padding.
   for ($c=0; $c -lt $cols.Count; $c++) {
     $n = "DR$c"
     Op @{ action='addField'; section=$DT; newName=$n; fieldRef=("{" + $alias + "." + $cols[$c].f + "}");
-          leftTwips=($x[$c]+70); topTwips=120; widthTwips=($cols[$c].w-140); heightTwips=($rowH-240) }
+          leftTwips=$x[$c]; topTwips=0; widthTwips=$cols[$c].w; heightTwips=$rowH }
     Op @{ action='setFontSize'; target=$n; fontSizePt=8 }
-    # Every column here can carry long free text - achievements, learning notes,
-    # appraiser and reviewer comments all come from NVARCHAR(2000) columns. Without
-    # can-grow they are clipped at the row height and the reader never learns that
-    # text is missing.
     Op @{ action='setCanGrow'; target=$n; canGrow=$true }
     if ($c -eq 0) { Op @{ action='setFont'; target=$n; fontName='Segoe UI' } }   # section font anchor
     Ink $n $INK
-    if ($c -gt 0) {
-      Op @{ action='addLine'; section=$DT; newName="DV$c"; leftTwips=$x[$c]; topTwips=0; widthTwips=0; heightTwips=$rowH }
-      Stroke "DV$c" $BORDER
-    }
+    [void]$col.Add(@{ action='setBorder'; target=$n
+                      left='single'; right='single'; bottom='single'; color=$BORDER })
   }
-  Op @{ action='addLine'; section=$DT; newName='DRule'; leftTwips=0; topTwips=($rowH-1); widthTwips=$W; heightTwips=0 }
-  Stroke 'DRule' $BORDER
 
   foreach ($c in $col) { Op $c }
 

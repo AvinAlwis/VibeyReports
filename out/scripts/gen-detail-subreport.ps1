@@ -71,7 +71,7 @@ for ($c=0; $c -lt 5; $c++) {
 for ($c=0; $c -lt 5; $c++) {
   $n = "DR$c"
   Op @{ action='addField'; section=$DT; newName=$n; fieldRef=$refs[$c];
-        leftTwips=($colX[$c]+70); topTwips=130; widthTwips=($colW[$c]-140); heightTwips=640 }
+        leftTwips=$colX[$c]; topTwips=0; widthTwips=$colW[$c]; heightTwips=$rowH }
   Op @{ action='setFontSize'; target=$n; fontSizePt=8 }
   # goal_id is a BIGINT identifier, not a quantity: no decimals, no separators.
   if ($c -eq 0) { Op @{ action='setNumberFormat'; target=$n; decimalPlaces=0; thousandsSeparator=$false } }
@@ -79,13 +79,12 @@ for ($c=0; $c -lt 5; $c++) {
   if ($c -eq 3) { Op @{ action='setCanGrow'; target=$n; canGrow=$true } }
   if ($c -eq 0) { Op @{ action='setFont'; target=$n; fontName='Segoe UI' } }   # section font anchor
   Ink $n $INK
-  if ($c -gt 0) {
-    Op @{ action='addLine'; section=$DT; newName="DV$c"; leftTwips=$colX[$c]; topTwips=0; widthTwips=0; heightTwips=$rowH }
-    Stroke "DV$c" $BORDER
-  }
+  # Ruled by the cells' own borders, not by drawn lines: a Line has no can-grow,
+  # so the hierarchy column growing left the old dividers behind at the original
+  # row height with the text running on past them. See gen-eval-subreports.ps1.
+  [void]$col.Add(@{ action='setBorder'; target=$n
+                    left='single'; right='single'; bottom='single'; color=$BORDER })
 }
-Op @{ action='addLine'; section=$DT; newName='DRule'; leftTwips=0; topTwips=($rowH-1); widthTwips=11186; heightTwips=0 }
-Stroke 'DRule' $BORDER
 
 foreach ($c in $col) { Op $c }
 
