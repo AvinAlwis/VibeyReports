@@ -830,6 +830,90 @@ bordering a new Box would pass without the applier touching anything. Per-side v
 on a Box regardless (`left=single right=none top=dotted bottom=none` round-trips), so there is no
 forced-uniformity rule; only `double` is refused.
 
+## PowerShell skill's read path (measured 2026-09-02)
+
+Measured while implementing `skill/vibey-reports/scripts/VibeyCrystal.psm1`'s `Get-VibeySchema`,
+against `tests/fixtures/SampleReport.rpt` through the x86 `powershell.exe` at
+`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` (the Crystal 11.5 assemblies are x86
+and will not load in a 64-bit host — the same constraint `vibey.ps1`'s relaunch-under-32-bit logic
+exists for). Every finding below reproduces the C# `ReportReader.cs` findings already recorded
+above; PowerShell's late-bound COM access agrees with the strongly-typed C# access on every point
+checked. Two things the task-2 brief guessed at (not measured, written from the C# implementation
+by reflection) turned out wrong, both caught before they shipped by printing real members instead
+of trusting the guess.
+
+### `PrintOutputController.GetPageMargins()` does not exist
+
+The brief's `Get-VibeySchema` called `$doc.PrintOutputController.GetPageMargins()`. Printing
+`$doc.PrintOutputController | Get-Member` shows no such method — the real methods are
+`GetPrintOptions`, `ModifyPageMargins`, `ModifyPrintOptions`, `Export`, `ExportEx`, etc. `Get-Member`
+on the return of `GetPrintOptions()` shows `PageContentWidth`, `PageContentHeight`, `PageMargins`
+(an object with `Left`/`Right`/`Top`/`Bottom`, not `leftMargin`/`rightMargin`/`topMargin`/
+`bottomMargin` as the brief assumed), `PaperSize`, `PaperOrientation`.
+
+`PageContentWidth`/`PageContentHeight` are the **printable** area with margins already excluded, not
+the full paper size, and there is no direct paper-size-in-twips property anywhere on the object (only
+a `PaperSize` enum, which cannot express a custom size). The full paper size is reconstructed by
+adding the margins back on, exactly as the C# `ReportReader.cs` already does (see "FIX (round 1, F1)"
+above) — measured against `SampleReport.rpt`:
+
+```
+PageContentWidth=11186  + Left=360 + Right=360  = 11906   (matches the fixture's known page width)
+PageContentHeight=16118 + Top=360  + Bottom=360 = 16838   (matches the fixture's known page height)
+```
+
+`Invoke-VibeyRead`'s `Get-VibeySchema` now reads `GetPrintOptions().PageMargins.{Left,Right,Top,
+Bottom}` and computes `widthTwips`/`heightTwips` from `PageContentWidth`/`PageContentHeight` plus
+those margins — `ReportDefController.ReportDefinition.PageSetup` (the brief's other guess for page
+geometry) was never used and its member set was not even checked, since this path already reproduces
+the exact measured fixture values.
+
+### The area-kind and object-kind enum integers the brief guessed are wrong from certain points onward
+
+Reflecting the installed `CrystalDecisions.ReportAppServer.ReportDefModel, Version=11.5.3300.0`
+assembly's actual enums (rather than trusting the brief's guessed switch statements) gives:
+
+```
+CrAreaSectionKindEnum:  ReportHeader=1  PageHeader=2  GroupHeader=3  Detail=4
+                        GroupFooter=5   [6 unused]    PageFooter=7   ReportFooter=8
+CrReportObjectKindEnum: Field=1  Text=2  Line=3  Box=4  Subreport=5  Picture=6
+                        Chart=7  Crosstab=8  BlobField=9  Map=10  OlapGrid=11  FieldHeading=12
+```
+
+Cross-checked live against `SampleReport.rpt`'s five areas, in document order:
+`AreaKind=1 ReportHeaderSection1`, `AreaKind=2 PageHeaderSection1`, `AreaKind=4 DetailSection1`,
+`AreaKind=7 PageFooterSection1`, `AreaKind=8 ReportFooterSection1` — confirming the gap at 6 is real,
+not a fixture artefact.
+
+The brief's `ConvertFrom-VibeyAreaKind` assumed a contiguous 1–7 run (`ReportHeader..ReportFooter`
+with no gap), which would have mislabelled `PageFooterSection1` as `"GroupFooter"` (its guessed 6)
+and `ReportFooterSection1` as `"PageFooter"` (its guessed 7). The brief's
+`ConvertFrom-VibeyObjectKind` guessed `FieldHeading=8`; the real value is 12 (8 is `Crosstab`).
+Measured impact: `PageHeaderSection1`'s `Text1`/`Text2` objects — named "Text" by Crystal's own
+default naming, easy to mistake for the `Text` kind — report kind integer 12, i.e. `FieldHeading`,
+not 2 (`Text`). With the brief's wrong number they would have fallen through to `"Other"` instead of
+being recognised as `FieldHeading`, matching the task's measured-facts note that this fixture has
+zero `Text`-kind objects despite two objects named `Text1`/`Text2`.
+
+Both switch statements in `VibeyCrystal.psm1` now use the reflected values above, with the reasoning
+recorded inline as comments so a future edit does not "correct" them back to the brief's numbers.
+
+### Font properties on an object with no explicitly-set font come back `$null`, not an accessor failure
+
+`FontColor.Font` on every object in `SampleReport.rpt` (all of which use the report's default font
+rather than an explicitly overridden one) returns a real, non-null COM object, but `.Name`/`.Size`/
+`.Bold` on it all come back `$null` through late-bound PowerShell property access — confirmed with
+`$null -eq $font.Name` etc., not just an empty-looking string. This is a legitimate "not explicitly
+set" reading (the object inherits the report's default at render time), not a broken or
+mistargeted accessor: casting the COM object to a strongly-typed `.NET` interface via `-as` or a
+direct cast (`[CrystalDecisions.ReportAppServer.ReportDefModel.ISCRFieldObject]$ro`) fails outright
+with a COM interface-mismatch error in both directions, so the late-bound property access the brief
+already used is the only one that works here, and its `$null` result is data, not a symptom.
+`Get-VibeyObjectInfo` leaves `fontName`/`fontSizePt`/`bold` at their `$null` default in this case
+rather than reporting a guessed value.
+
+---
+
 ### Subreport takes a full border
 
 Measured on `out/reports/PMSV10_IndDetailedEval.rpt`'s `Subreport3` (read as the source, written to
