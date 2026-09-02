@@ -25,7 +25,23 @@ $SRC = 'sp_perf_detailed_eval_overview;1'
 $GRP = 'emp_number'                        # field the report groups on
 $W   = 11186
 $P1  = 'empnumberHeaderSection1'   # page 1 - repeats per employee
-$P2  = 'DetailSection1'            # page 2
+
+# Page 2's five tables get ONE SECTION EACH. Objects inside a Crystal section are
+# absolutely positioned and do NOT reflow: when a sub-report grows, whatever sits
+# below it in the same section stays put and gets overlapped. That is exactly what
+# happened when all five shared DetailSection1 - the FDP comment tables ran over
+# the band beneath them. Sections, unlike objects, do stack.
+#
+# These extra Details sections were added by hand in the Crystal Designer, on the
+# SHELL rather than on the built report, so every regeneration inherits them. The
+# SDK cannot create them: ISCRReportDefController has no section Add/Remove.
+#
+# The names are read from the shell, NOT guessed - Crystal numbered them 1, 6, 7,
+# 8, 9 rather than 1-5.
+#
+# >>> If you add or remove a Details section in the shell, update this list. <<<
+$P2LIST = @('DetailSection1', 'DetailSection6', 'DetailSection7',
+            'DetailSection8', 'DetailSection9')
 
 $INK    = '#1F2937'
 $MUTED  = '#6B7280'
@@ -88,7 +104,7 @@ function Band($caption, $tp) {
 Op @{ action='addGroup'; fieldRef=("{" + $SRC + "." + $GRP + "}"); direction='ascending' }
 
 Op @{ action='resizeSection'; section=$P1; heightTwips=15800 }
-Op @{ action='resizeSection'; section=$P2; heightTwips=15800 }
+foreach ($sec in $P2LIST) { Op @{ action='resizeSection'; section=$sec; heightTwips=15800 } }
 Op @{ action='resizeSection'; section='ReportHeaderSection1'; heightTwips=0 }
 Op @{ action='resizeSection'; section='PageHeaderSection1';   heightTwips=0 }
 Op @{ action='resizeSection'; section='PageFooterSection1';   heightTwips=420 }
@@ -210,8 +226,8 @@ Op @{ action='addSubreport'; section=$SEC; newName='CompanyLogo';
 $p1h = $y + 150
 
 # =============================== PAGE 2 =======================================
-$SEC = $P2
-$y = 0
+# One table per section, so a grown sub-report pushes the next table down the
+# page instead of printing over it.
 
 # Two field-to-field links per sub-report. Both sides RETURN these columns - that
 # is why every procedure selects performance_cycle_id and emp_number. Types must
@@ -223,8 +239,15 @@ $subs = @(
   @{ n='FdpJob';     cap='ADDITIONAL FEEDBACK - JOB PREFERENCES';          h=2000; file='PMSV10_IndDetEval_JobPreferences.rpt';  alias='sp_perf_detailed_eval_fdp_job;1' },
   @{ n='FdpTn';      cap='ADDITIONAL FEEDBACK - TRAINING NEEDS';           h=2000; file='PMSV10_IndDetEval_TrainingNeeds.rpt';   alias='sp_perf_detailed_eval_fdp_tn;1' })
 
-foreach ($s in $subs) {
-  $y = Band $s.cap $y
+if ($subs.Count -ne $P2LIST.Count) {
+  throw ("{0} page-2 tables but {1} Details sections in the shell - add or remove a section in _shell_overview.rpt, then update `$P2LIST" -f $subs.Count, $P2LIST.Count)
+}
+
+$p2h = @{}
+for ($i = 0; $i -lt $subs.Count; $i++) {
+  $s = $subs[$i]
+  $SEC = $P2LIST[$i]      # each table owns its section; y restarts at 0 in each
+  $y = Band $s.cap 0
   Op @{ action='addSubreport'; section=$SEC; newName=$s.n;
         reportPath=("D:/VibeyReports/out/reports/" + $s.file)
         leftTwips=0; topTwips=$y; widthTwips=$W; heightTwips=$s.h }
@@ -234,9 +257,8 @@ foreach ($s in $subs) {
   Op @{ action='setSubreportLink'; target=$s.n
         mainReportField=("{" + $SRC + ".emp_number}")
         subreportField=("{" + $s.alias + ".emp_number}") }
-  $y = $y + $s.h + 200
+  $p2h[$SEC] = $y + $s.h + 120
 }
-$p2h = $y
 
 # =============================== PAGE FURNITURE ===============================
 # The spec asks for "Page 1 of 2" in the footer of both pages. Page Footer prints
@@ -268,7 +290,7 @@ foreach ($c in $col) { Op $c }
 
 # Trim both sections to what was actually used.
 Op @{ action='resizeSection'; section=$P1; heightTwips=$p1h }
-Op @{ action='resizeSection'; section=$P2; heightTwips=$p2h }
+foreach ($sec in $P2LIST) { Op @{ action='resizeSection'; section=$sec; heightTwips=$p2h[$sec] } }
 
 $plan = @{
   command    = 'apply'
@@ -281,4 +303,4 @@ $plan = @{
 
 Write-Output ("operations : {0}  (colour {1})" -f $ops.Count, $col.Count)
 Write-Output ("page 1     : {0} twips  (limit 16118)" -f $p1h)
-Write-Output ("page 2     : {0} twips  (limit 16118)" -f $p2h)
+foreach ($sec in $P2LIST) { Write-Output ("  {0,-16} {1} twips" -f $sec, $p2h[$sec]) }
