@@ -2002,6 +2002,54 @@ public class LayoutPlanValidatorTests
         result.IsValid.Should().BeTrue(because: Why(result));
     }
 
+    /// <summary>
+    /// A Subreport clips its own contents at the container height unless the CONTAINER can grow.
+    /// The original { Text, Field } allowlist refused this, which produced a real defect: FDP
+    /// comment tables overflowed their sub-report frames and collided with the section below.
+    /// <para>
+    /// Targets an ALREADY-embedded sub-report by its placed name, not one added in this plan:
+    /// Crystal renames a sub-report it places, so every operation except setSubreportLink is
+    /// rejected on one added in the same plan. Growing a sub-report is therefore always a second
+    /// plan, run after the report has been saved and re-read.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Validate_AcceptsSetCanGrowOnAnEmbeddedSubreport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetCanGrow, Target = "Subreport1", CanGrow = true
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: Why(result));
+    }
+
+    /// <summary>
+    /// The other half of the rule above: a sub-report added earlier in the SAME plan cannot be
+    /// grown, because the name the plan used is not the name Crystal gave the placed object.
+    /// </summary>
+    [Fact]
+    public void Validate_RejectsSetCanGrowOnASubreportAddedInTheSamePlan()
+    {
+        var plan = PlanOf(
+            new LayoutOperation
+            {
+                Action = LayoutActions.AddSubreport, Section = "Section1", NewName = "Detail",
+                ReportPath = @"C:\reports\detail.rpt",
+                LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 500
+            },
+            new LayoutOperation
+            {
+                Action = LayoutActions.SetCanGrow, Target = "Detail", CanGrow = true
+            });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+    }
+
     [Fact]
     public void Validate_RejectsSetCanGrowOnALine()
     {

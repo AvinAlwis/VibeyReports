@@ -25,9 +25,19 @@ public static class LayoutPlanValidator
     /// setCanGrow only makes sense on an object that holds flowing content it could be clipping.
     /// ISCRObjectFormat.EnableCanGrow is structurally present on every report object (a Line and a
     /// Box carry one too), so this restriction is semantic, not structural.
+    /// <para>
+    /// Widened from the original { Text, Field }, which was too narrow and produced a real defect:
+    /// a Subreport placed in a host report clips its own contents at the container height unless
+    /// the CONTAINER can grow too, and this list refused to let it. FieldHeading is included for
+    /// the same reason - FieldHeadingObjectClass implements ISCRTextObject and holds real text.
+    /// The project made the mirror-image mistake once before, when FontableKinds omitted
+    /// FieldHeading and font changes on wizard-generated column headings were rejected with a
+    /// message claiming they had no font.
+    /// </para>
     /// </summary>
     private static readonly HashSet<string> CanGrowKinds =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Text", "Field" };
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "Text", "Field", "FieldHeading", "Subreport" };
 
     /// <summary>
     /// addSpecialField's allowlist. An unknown specialType must be rejected here, not passed
