@@ -77,9 +77,10 @@ public class LayoutPlanTests
             "addSubreport", "setSubreportLink",
             "removeTable", "addTable", "setTableLocation",
             "setSectionBreak", "addSpecialField", "setNumberFormat", "setCanGrow", "setSuppress",
-            "addGroup", "addSort"
+            "addGroup", "addSort",
+            "setBorder"
         });
-        LayoutActions.All.Should().HaveCount(28);
+        LayoutActions.All.Should().HaveCount(29);
     }
 
     [Fact]
@@ -119,6 +120,43 @@ public class LayoutPlanTests
         plan.Operations[1].Direction.Should().Be("descending");
         plan.Operations[1].SortIndex.Should().Be(1);
         plan.Operations[1].GroupIndex.Should().BeNull();
+    }
+
+    [Fact]
+    public void BorderStyles_All_ContainsEverySupportedStyleAndNothingElse()
+    {
+        // Every member of CrLineStyleEnum, unlike SortDirections: none of them needs a parameter
+        // setBorder has no field to carry, so nothing is deliberately left out here.
+        BorderStyles.All.Should().BeEquivalentTo(new[] { "none", "single", "double", "dashed", "dotted" });
+    }
+
+    [Fact]
+    public void LayoutOperation_DeserialisesTheBorderFields()
+    {
+        const string json = """
+        {
+          "planVersion": 1,
+          "operations": [
+            { "action": "setBorder", "target": "DRComment", "left": "single", "right": "single",
+              "top": "none", "bottom": "dashed", "color": "#1F2A37" }
+          ]
+        }
+        """;
+
+        var plan = JsonSerializer.Deserialize<LayoutPlan>(json, VibeyJson.Options)!;
+        var op = plan.Operations[0];
+
+        op.Action.Should().Be(LayoutActions.SetBorder);
+        op.Target.Should().Be("DRComment");
+        op.Left.Should().Be("single");
+        op.Right.Should().Be("single");
+        op.Top.Should().Be("none");
+        op.Bottom.Should().Be("dashed");
+        op.Color.Should().Be("#1F2A37");
+        // The side names are edges, not geometry: leftTwips is a different field and must not be
+        // populated by "left".
+        op.LeftTwips.Should().BeNull();
+        op.TopTwips.Should().BeNull();
     }
 
     [Fact]

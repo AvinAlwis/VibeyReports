@@ -32,6 +32,7 @@ public static class LayoutActions
     public const string SetSuppress = "setSuppress";
     public const string AddGroup = "addGroup";
     public const string AddSort = "addSort";
+    public const string SetBorder = "setBorder";
 
     public static readonly string[] All =
     {
@@ -40,8 +41,29 @@ public static class LayoutActions
         SetTextColor, SetFillColor, SetLineColor, SetSectionBackground, AddSubreport, SetSubreportLink,
         RemoveTable, AddTable, SetTableLocation,
         SetSectionBreak, AddSpecialField, SetNumberFormat, SetCanGrow, SetSuppress,
-        AddGroup, AddSort
+        AddGroup, AddSort,
+        SetBorder
     };
+}
+
+/// <summary>
+/// The friendly line-style vocabulary <see cref="LayoutActions.SetBorder"/> accepts for each of
+/// the four sides, and the single place it is defined. Maps one-to-one onto CrLineStyleEnum in
+/// the worker: a caller writes "single", not "crLineStyleSingle".
+///
+/// All five members of the enum are here -- unlike <see cref="SortDirections"/>, nothing is left
+/// out, because none of them needs a parameter this operation has no field for. Anything NOT in
+/// this list is rejected by the validator rather than passed through to COM.
+/// </summary>
+public static class BorderStyles
+{
+    public const string None = "none";
+    public const string Single = "single";
+    public const string Double = "double";
+    public const string Dashed = "dashed";
+    public const string Dotted = "dotted";
+
+    public static readonly string[] All = { None, Single, Double, Dashed, Dotted };
 }
 
 /// <summary>
@@ -224,4 +246,26 @@ public sealed class LayoutOperation
     /// rather than silently ignored.
     /// </summary>
     public bool? SuppressIfBlank { get; set; }
+
+    /// <summary>
+    /// setBorder: line style for the object's LEFT edge, one of <see cref="BorderStyles.All"/>,
+    /// matched case-insensitively. Optional -- an omitted side is left exactly as it is, so a plan
+    /// can add a bottom rule without disturbing an existing left divider.
+    /// <para>
+    /// Named for the edge, not for twips: there is no clash with <see cref="LeftTwips"/>, which is
+    /// a position. All four sides plus <see cref="LayoutOperation.Color"/> are optional
+    /// individually, but the validator requires at least one of the five, so a setBorder that
+    /// would do nothing is a plan error rather than a silent no-op.
+    /// </para>
+    /// </summary>
+    public string? Left { get; set; }
+
+    /// <summary>setBorder: line style for the RIGHT edge. See <see cref="Left"/>.</summary>
+    public string? Right { get; set; }
+
+    /// <summary>setBorder: line style for the TOP edge. See <see cref="Left"/>.</summary>
+    public string? Top { get; set; }
+
+    /// <summary>setBorder: line style for the BOTTOM edge. See <see cref="Left"/>.</summary>
+    public string? Bottom { get; set; }
 }

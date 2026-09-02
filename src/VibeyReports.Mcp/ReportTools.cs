@@ -23,7 +23,9 @@ public sealed class ReportTools
         Read a Crystal Reports XI R2 .rpt file and return its layout as JSON: page size and
         margins in twips, every section with its height, backgroundColorHex and its
         suppressed/suppressIfBlank/newPageBefore/newPageAfter flags, and every object
-        with its name, kind, position, size, font, alignment, canGrow, suppressed, and (where
+        with its name, kind, position, size, font, alignment, canGrow, suppressed, border
+        (left/right/top/bottom line style plus colorHex, set by apply_layout's setBorder - carried
+        by every object kind), and (where
         applicable) numberFormat (decimalPlaces/thousandsSeparator/suppressIfZero, for Field
         objects) and
         textColorHex/fillColorHex/lineColorHex/subreportName/subreportLinks (a Subreport
@@ -102,6 +104,8 @@ public sealed class ReportTools
                             groupIndex (0-based, outermost first; omitted appends)
           addSort           fieldRef, direction (ascending | descending), and optionally
                             sortIndex (0-based; omitted appends)
+          setBorder         target (ANY object), and at least one of left, right, top, bottom
+                            (none | single | double | dashed | dotted) or color
 
         "target" names an existing object (from read_report); "section" names an existing
         section. addField's fieldRef MUST be one of the formulaForm values from the schema's
@@ -223,6 +227,14 @@ public sealed class ReportTools
         addSort on that field to be rejected. Crystal refuses a second group or a second sort on the
         same field, and this tool rejects both before writing anything.
         Groups and sorts read back through read_report as "groups" and "sorts".
+        setBorder is how you rule a table. Do NOT draw a table grid out of addLine objects: a Line
+        has a fixed height and no canGrow, so the moment a cell grows to fit long text the ruling
+        stays behind and the text runs out through the bottom of the table. A border belongs to the
+        object and is drawn around whatever height that object ends up with, so put the border on
+        the field itself - typically left+right+bottom on each cell - and the grid grows with the
+        row. It applies to every object kind, including Box and Subreport, and each side you omit
+        is left as it is, so you can add a bottom rule without disturbing an existing divider.
+        Borders read back through read_report as each object's "border".
         All coordinates are twips (1440 = 1 inch).
         Layout, data-source bindings, grouping and sorting only: database connections, SQL,
         formulas, parameters and record selection cannot be changed and any attempt is rejected.

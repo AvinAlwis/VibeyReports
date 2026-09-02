@@ -238,7 +238,10 @@ namespace VibeyReports.CrystalWorker
                 // What setCanGrow and setSuppress's object form write. ISCRObjectFormat is carried
                 // by every report object kind, so these are read for all of them, not just fields.
                 CanGrow = ro.Format != null && ro.Format.EnableCanGrow,
-                Suppressed = ro.Format != null && ro.Format.EnableSuppress
+                Suppressed = ro.Format != null && ro.Format.EnableSuppress,
+                // What setBorder writes. ISCRBorder hangs off ISCRReportObject itself, so this is
+                // read for every kind -- there is no kind gate on the write side either.
+                Border = ReadBorder(ro)
             };
 
             switch (ro)
@@ -284,6 +287,59 @@ namespace VibeyReports.CrystalWorker
             }
 
             return info;
+        }
+
+        /// <summary>
+        /// Reads back exactly the five properties setBorder writes -- the four side styles and
+        /// the colour -- so the operation is not write-only and a round-trip test asserts the same
+        /// properties it set. That matters here specifically: this project has shipped a
+        /// write-only property twice, and setNumberFormat's silent no-op survived its first test
+        /// because the assertion looked at something the applier never touched.
+        ///
+        /// Styles come back as the friendly BorderStyles names the operation accepts, not as
+        /// CrLineStyleEnum names, so what is read is directly comparable with what was written.
+        ///
+        /// Wrapped defensively, exactly as ReadNumberFormat and ReadSubreportLinks are: a border
+        /// that cannot be read leaves the property null rather than failing the whole report read.
+        /// </summary>
+        private static BorderInfo ReadBorder(ISCRReportObject ro)
+        {
+            try
+            {
+                var border = ro.Border;
+                if (border == null) return null;
+
+                return new BorderInfo
+                {
+                    Left = ClassifyLineStyle(border.LeftLineStyle),
+                    Right = ClassifyLineStyle(border.RightLineStyle),
+                    Top = ClassifyLineStyle(border.TopLineStyle),
+                    Bottom = ClassifyLineStyle(border.BottomLineStyle),
+                    ColorHex = ColorRef.ToHex(border.BorderColor)
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CrLineStyleEnum -&gt; the BorderStyles vocabulary. A member Crystal reports that this
+        /// tool has no name for is returned verbatim as its enum name rather than being flattened
+        /// into "none", which would report a border that is there as one that is not.
+        /// </summary>
+        private static string ClassifyLineStyle(CrLineStyleEnum style)
+        {
+            switch (style)
+            {
+                case CrLineStyleEnum.crLineStyleNoLine: return BorderStyles.None;
+                case CrLineStyleEnum.crLineStyleSingle: return BorderStyles.Single;
+                case CrLineStyleEnum.crLineStyleDouble: return BorderStyles.Double;
+                case CrLineStyleEnum.crLineStyleDashed: return BorderStyles.Dashed;
+                case CrLineStyleEnum.crLineStyleDotted: return BorderStyles.Dotted;
+                default: return style.ToString();
+            }
         }
 
         /// <summary>

@@ -112,6 +112,35 @@ public sealed class ObjectInfo
     /// Also left null when the format cannot be read, rather than failing the whole report read.
     /// </summary>
     public NumberFormatInfo? NumberFormat { get; set; }
+
+    /// <summary>
+    /// The object's four border edges and their colour, as written by setBorder. Populated for
+    /// EVERY object kind -- ISCRBorder hangs off ISCRReportObject itself, at the same level as
+    /// Left/Top/Width/Height, so a Box and a Subreport carry one exactly as a Field does. Null
+    /// only when the border could not be read, which is reported as an absent property rather
+    /// than failing the whole report read.
+    /// </summary>
+    public BorderInfo? Border { get; set; }
+}
+
+/// <summary>
+/// An object's border, as written by setBorder and read back here. The four side styles are the
+/// friendly <see cref="BorderStyles"/> names the operation accepts, not Crystal's enum names, so
+/// a round-trip test asserts the same vocabulary it wrote.
+///
+/// This is the thing a Line object cannot do: a border belongs to the object, so it grows with it
+/// when can-grow makes the object taller. A table ruled with addLine objects loses its grid the
+/// moment a cell grows; a table ruled with borders does not.
+/// </summary>
+public sealed class BorderInfo
+{
+    public string Left { get; set; } = BorderStyles.None;
+    public string Right { get; set; } = BorderStyles.None;
+    public string Top { get; set; } = BorderStyles.None;
+    public string Bottom { get; set; } = BorderStyles.None;
+
+    /// <summary>"#RRGGBB", or null when Crystal reports the "no colour" sentinel (see ColorRef).</summary>
+    public string? ColorHex { get; set; }
 }
 
 /// <summary>

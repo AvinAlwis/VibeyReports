@@ -2066,6 +2066,187 @@ public class LayoutPlanValidatorTests
         result.Errors.Should().ContainSingle().Which.Message.Should().Contain("is a Line");
     }
 
+    // --- setBorder ------------------------------------------------------------------
+    // The whole point of setBorder is that it has NO kind allowlist: ISCRBorder hangs off
+    // ISCRReportObject itself, every object carries one, and this project has already shipped two
+    // too-narrow allowlists (FontableKinds without FieldHeading; CanGrowKinds without Subreport,
+    // which caused the growing-cell defect setBorder exists to fix). The Box and Subreport cases
+    // below are the regression tests against a third.
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("single")]
+    [InlineData("double")]
+    [InlineData("dashed")]
+    [InlineData("dotted")]
+    public void Validate_AcceptsSetBorderWithOneSideInEveryStyle(string style)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName", Bottom = style
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderWithAllFourSidesAndAColour()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName",
+            Left = "single", Right = "single", Top = "dotted", Bottom = "double",
+            Color = "#1F2A37"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderWithColourOnly()
+    {
+        // Recolouring an existing border without restating its four sides is a legitimate
+        // operation, so "colour but no side" must pass the at-least-one rule.
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName", Color = "#C0C0C0"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderCaseInsensitively()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName", Left = "SINGLE", Top = "Dotted"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderOnABox()
+    {
+        var schema = Schema();
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "Frame", Kind = "Box", LeftTwips = 0, TopTwips = 0, WidthTwips = 3000, HeightTwips = 300
+        });
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "Frame", Bottom = "single"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderOnAnEmbeddedSubreport()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "Subreport1",
+            Left = "single", Right = "single", Top = "single", Bottom = "single"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, SchemaWithEmbeddedSubreport());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderOnALine()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "HeaderRule", Bottom = "single"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderWithNoSideAndNoColour()
+    {
+        // A silent no-op is worse than a plan error: the caller believes a border was drawn and
+        // only finds out from the rendered PDF.
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetBorder, Target = "CustomerName" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("at least one");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderOnAnUnknownStyleName()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName", Bottom = "crLineStyleSingle"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        // Names the offending side, so a caller with four sides supplied knows which one is wrong.
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("bottom");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderOnAMalformedColour()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "CustomerName", Bottom = "single", Color = "red"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("#RRGGBB");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderWithoutATarget()
+    {
+        var plan = PlanOf(new LayoutOperation { Action = LayoutActions.SetBorder, Bottom = "single" });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("requires \"target\"");
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderOnAnObjectThatDoesNotExist()
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "NoSuchThing", Bottom = "single"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("does not exist");
+    }
+
     [Fact]
     public void Validate_RejectsSetCanGrowOnABox()
     {

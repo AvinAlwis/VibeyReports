@@ -55,6 +55,9 @@ public static class LayoutPlanValidator
     private static readonly HashSet<string> Directions =
         new HashSet<string>(SortDirections.All, StringComparer.OrdinalIgnoreCase);
 
+    private static readonly HashSet<string> BorderStyleNames =
+        new HashSet<string>(BorderStyles.All, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Measured: a Group Header / Group Footer section Crystal creates for a new group starts at
     /// 250 twips, on every fixture tried. The simulation needs SOME height for the new sections so
@@ -250,6 +253,7 @@ public static class LayoutPlanValidator
             or LayoutActions.RemoveObject
             or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor
             or LayoutActions.SetNumberFormat or LayoutActions.SetCanGrow
+            or LayoutActions.SetBorder
             || suppressOnObject;
         // F2: setSubreportLink is deliberately NOT in needsTarget -- its target is resolved
         // against subreportsByName (the SubreportName name-space), not `objects` (the report
@@ -489,6 +493,42 @@ public static class LayoutPlanValidator
                 }
                 if (op.CanGrow is null) Err("\"setCanGrow\" requires \"canGrow\".");
                 break;
+
+            case LayoutActions.SetBorder:
+            {
+                // DELIBERATELY NO KIND CHECK. ISCRBorder hangs off ISCRReportObject itself -- the
+                // same level as Left/Top/Width/Height, not off ObjectFormat -- so every report
+                // object without exception carries one, and unlike can-grow there is nothing
+                // semantically odd about bordering a Box, a Line or a Subreport. This project has
+                // made the too-narrow-allowlist mistake twice already (FontableKinds omitting
+                // FieldHeading; CanGrowKinds omitting Subreport, which shipped and caused the very
+                // defect setBorder exists to fix). There is no third one here.
+                var sides = new[] { op.Left, op.Right, op.Top, op.Bottom };
+                var sideNames = new[] { "left", "right", "top", "bottom" };
+
+                var anySide = false;
+                for (var s = 0; s < sides.Length; s++)
+                {
+                    if (string.IsNullOrWhiteSpace(sides[s])) continue;
+                    anySide = true;
+                    if (!BorderStyleNames.Contains(sides[s]!))
+                        Err($"\"{sides[s]}\" is not a valid border style for \"{sideNames[s]}\"; use one of " +
+                            "\"none\", \"single\", \"double\", \"dashed\" or \"dotted\".");
+                }
+
+                // A setBorder that names no side and no colour would report ok and change nothing;
+                // the caller would only find out from the rendered PDF. Same reasoning as
+                // setSectionBreak's and setNumberFormat's "at least one" rules.
+                if (!anySide && op.Color is null)
+                {
+                    Err("\"setBorder\" requires at least one of \"left\", \"right\", \"top\", " +
+                        "\"bottom\" or \"color\".");
+                    break;
+                }
+
+                if (op.Color is not null) CheckColor(op.Color, Err);
+                break;
+            }
 
             case LayoutActions.SetSuppress:
                 // The target/section exclusivity, the suppressIfBlank-needs-a-section rule and the

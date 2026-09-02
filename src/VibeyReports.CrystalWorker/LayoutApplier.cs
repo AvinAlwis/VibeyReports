@@ -235,6 +235,10 @@ namespace VibeyReports.CrystalWorker
                                     RequireObjectFormat(o, LayoutActions.SetSuppress).EnableSuppress = op.Suppress.Value);
                             break;
 
+                        case LayoutActions.SetBorder:
+                            ModifyObject(doc, op.Target, o => SetBorder(o, op));
+                            break;
+
                         case LayoutActions.AddGroup:
                             AddGroup(doc, op);
                             break;
@@ -807,6 +811,60 @@ namespace VibeyReports.CrystalWorker
             }
             if (op.ThousandsSeparator.HasValue) numeric.ThousandsSeparator = op.ThousandsSeparator.Value;
             if (op.SuppressIfZero.HasValue) numeric.EnableSuppressIfZero = op.SuppressIfZero.Value;
+        }
+
+        /// <summary>
+        /// Writes the four border edges and the border colour setBorder exposes.
+        ///
+        /// A border is the only ruling that survives a growing cell. A Line object has no
+        /// can-grow, so a table ruled with Lines loses its grid the moment setCanGrow lets a cell
+        /// get taller; ISCRBorder belongs to the object and is drawn around whatever height the
+        /// object ends up with.
+        ///
+        /// Everything is mutated in place on the clone ModifyObject already deep-copied -- the
+        /// same shape SetNumberFormat uses for the nested ISCRFieldFormat and WithFont uses for
+        /// ISCRFont. See docs/sdk-notes.md for what was measured before settling on it.
+        ///
+        /// Each side is written only when the caller supplied it, so adding a bottom rule cannot
+        /// silently clear an existing left divider. The validator guarantees at least one side or
+        /// the colour is present, so this can never be a no-op.
+        /// </summary>
+        private static void SetBorder(ISCRReportObject obj, LayoutOperation op)
+        {
+            var border = obj.Border;
+            if (border == null)
+                throw new InvalidOperationException(
+                    $"Object \"{obj.Name}\" ({obj.Kind}) has no border object, so \"setBorder\" " +
+                    "cannot be applied to it.");
+
+            if (!string.IsNullOrWhiteSpace(op.Left)) border.LeftLineStyle = ParseLineStyle(op.Left);
+            if (!string.IsNullOrWhiteSpace(op.Right)) border.RightLineStyle = ParseLineStyle(op.Right);
+            if (!string.IsNullOrWhiteSpace(op.Top)) border.TopLineStyle = ParseLineStyle(op.Top);
+            if (!string.IsNullOrWhiteSpace(op.Bottom)) border.BottomLineStyle = ParseLineStyle(op.Bottom);
+
+            // Reuses ColorRef, the single COLORREF converter, exactly as setTextColor/setFillColor
+            // do. The validator has already checked the "#RRGGBB" form with the same rule.
+            if (op.Color != null) border.BorderColor = ColorRef.FromHex(op.Color);
+        }
+
+        /// <summary>
+        /// The friendly BorderStyles vocabulary -> CrLineStyleEnum. The validator's allowlist is
+        /// the contract, so anything reaching here is one of the five; a sixth would be a
+        /// validator bug and is reported as one rather than silently becoming "no line".
+        /// </summary>
+        private static CrLineStyleEnum ParseLineStyle(string style)
+        {
+            switch ((style ?? "").Trim().ToLowerInvariant())
+            {
+                case BorderStyles.None: return CrLineStyleEnum.crLineStyleNoLine;
+                case BorderStyles.Single: return CrLineStyleEnum.crLineStyleSingle;
+                case BorderStyles.Double: return CrLineStyleEnum.crLineStyleDouble;
+                case BorderStyles.Dashed: return CrLineStyleEnum.crLineStyleDashed;
+                case BorderStyles.Dotted: return CrLineStyleEnum.crLineStyleDotted;
+                default:
+                    throw new InvalidOperationException(
+                        $"\"{style}\" is not a border style; the validator should have rejected it.");
+            }
         }
 
         /// <summary>
