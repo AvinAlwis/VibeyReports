@@ -94,6 +94,30 @@ public class ReportToolsTests
     }
 
     /// <summary>
+    /// setBorder's read-back half at the MCP boundary. Same reasoning as the formatting properties
+    /// above: a border the agent cannot see is a border it cannot verify, and this project has
+    /// shipped a write-only property twice.
+    /// </summary>
+    [Fact]
+    public async Task ReadReport_JsonIncludesTheBorderOfEveryObject()
+    {
+        var json = await Tools().ReadReport(Fixtures.SampleReport, CancellationToken.None);
+
+        foreach (var property in new[] { "border", "left", "right", "top", "bottom", "colorHex" })
+            json.Should().Contain(property);
+
+        var schema = JsonSerializer.Deserialize<ReportSchema>(json, VibeyJson.Options)!;
+        var objects = schema.Sections.SelectMany(s => s.Objects).ToList();
+
+        // EVERY kind, not just the text-bearing ones: ISCRBorder hangs off ISCRReportObject
+        // itself, and a border reported for only some kinds would quietly reintroduce the
+        // too-narrow allowlist this operation was written to avoid.
+        objects.Should().NotBeEmpty().And.OnlyContain(o => o.Border != null);
+        objects.Should().OnlyContain(o => o.Border!.Left == "none");
+        objects.Should().OnlyContain(o => o.Border!.ColorHex == "#000000");
+    }
+
+    /// <summary>
     /// The subreport half of the task, at the MCP boundary: read_report's JSON must expose
     /// subreportLinks for a Subreport-kind object, using a real apply_layout round trip (addSubreport
     /// then setSubreportLink) rather than a hand-built schema, so a regression anywhere in the

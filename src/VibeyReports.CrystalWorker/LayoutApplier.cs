@@ -821,9 +821,17 @@ namespace VibeyReports.CrystalWorker
         /// get taller; ISCRBorder belongs to the object and is drawn around whatever height the
         /// object ends up with.
         ///
-        /// Everything is mutated in place on the clone ModifyObject already deep-copied -- the
-        /// same shape SetNumberFormat uses for the nested ISCRFieldFormat and WithFont uses for
-        /// ISCRFont. See docs/sdk-notes.md for what was measured before settling on it.
+        /// MEASURED before this shape was settled (docs/sdk-notes.md), because setNumberFormat had
+        /// already proved that "returned ok" is not evidence: everything is mutated IN PLACE on the
+        /// clone ModifyObject already deep-copied, the same shape SetNumberFormat uses for the
+        /// nested ISCRFieldFormat and WithFont uses for ISCRFont, and a set-save-reopen round trip
+        /// confirms all five properties come back. ISCRBorder needs no wholesale replacement and
+        /// there is no EnableSystemDefault-style gate over it.
+        ///
+        /// Two limits the validator now rejects up front, also measured: a Line or a Box answers
+        /// crLineStyleDouble with COMException "The line style value is not valid.", and a Line
+        /// keeps only the edge it lies on (TopLineStyle when horizontal, LeftLineStyle when
+        /// vertical) while silently discarding the other three.
         ///
         /// Each side is written only when the caller supplied it, so adding a bottom rule cannot
         /// silently clear an existing left divider. The validator guarantees at least one side or

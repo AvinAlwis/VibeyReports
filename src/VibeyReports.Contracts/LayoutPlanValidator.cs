@@ -506,14 +506,45 @@ public static class LayoutPlanValidator
                 var sides = new[] { op.Left, op.Right, op.Top, op.Bottom };
                 var sideNames = new[] { "left", "right", "top", "bottom" };
 
+                // MEASURED, not assumed (docs/sdk-notes.md). Two constraints that are properties of
+                // the STYLE and the SIDE rather than of the operation, and both of which Crystal
+                // otherwise answers in a way this project has been burned by before: one with a
+                // mid-plan COMException that faults the session and loses the whole plan, the other
+                // with a silent no-op that reports ok and changes nothing.
+                var isDrawn = string.Equals(target!.Kind, "Line", StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(target.Kind, "Box", StringComparison.OrdinalIgnoreCase);
+                var isLine = string.Equals(target.Kind, "Line", StringComparison.OrdinalIgnoreCase);
+                // A Crystal line lies along exactly one edge -- addLine already forces one axis to
+                // zero -- and its Border IS that line: a horizontal line's style is TopLineStyle,
+                // a vertical line's is LeftLineStyle. The other three sides are accepted by COM and
+                // then discarded on save.
+                var lineSide = target.Height == 0 ? "top" : "left";
+
                 var anySide = false;
                 for (var s = 0; s < sides.Length; s++)
                 {
                     if (string.IsNullOrWhiteSpace(sides[s])) continue;
                     anySide = true;
                     if (!BorderStyleNames.Contains(sides[s]!))
+                    {
                         Err($"\"{sides[s]}\" is not a valid border style for \"{sideNames[s]}\"; use one of " +
                             "\"none\", \"single\", \"double\", \"dashed\" or \"dotted\".");
+                        continue;
+                    }
+
+                    if (isDrawn && string.Equals(sides[s], BorderStyles.Double, StringComparison.OrdinalIgnoreCase))
+                        Err($"Object \"{op.Target}\" is a {target.Kind}, and Crystal has no double line style for " +
+                            $"a Line or a Box -- it answers one with COMException \"The line style value is not " +
+                            $"valid.\" mid-plan. Use \"single\", \"dashed\" or \"dotted\" for \"{sideNames[s]}\", " +
+                            "or put the double border on a Text or Field object instead.");
+
+                    if (isLine && sideNames[s] != lineSide)
+                        Err($"Object \"{op.Target}\" is a Line lying along its \"{lineSide}\" edge, and a Line's " +
+                            $"border IS the line itself: Crystal keeps only \"{lineSide}\" and discards " +
+                            $"\"{sideNames[s]}\" on save, reporting success. Set \"{lineSide}\" to restyle the " +
+                            "line, or -- if what you want is a rule that grows with a cell -- put the border on " +
+                            "the Text or Field object instead of drawing a Line at all, which is what setBorder " +
+                            "exists for.");
                 }
 
                 // A setBorder that names no side and no colour would report ok and change nothing;

@@ -2168,8 +2168,25 @@ public class LayoutPlanValidatorTests
     }
 
     [Fact]
-    public void Validate_AcceptsSetBorderOnALine()
+    public void Validate_AcceptsSetBorderOnAHorizontalLinesOwnTopEdge()
     {
+        // A Line is not gated out of setBorder -- measured, its Border IS the line, and the edge it
+        // lies on restyles it. HeaderRule has HeightTwips 0, so that edge is "top".
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "HeaderRule", Top = "dashed"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema());
+
+        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+    }
+
+    [Fact]
+    public void Validate_RejectsSetBorderOnAHorizontalLinesOtherThreeEdges()
+    {
+        // MEASURED: Crystal accepts these, reports ok, and discards them on save. A silent no-op is
+        // exactly the failure mode setNumberFormat shipped with once already.
         var plan = PlanOf(new LayoutOperation
         {
             Action = LayoutActions.SetBorder, Target = "HeaderRule", Bottom = "single"
@@ -2177,7 +2194,78 @@ public class LayoutPlanValidatorTests
 
         var result = LayoutPlanValidator.Validate(plan, Schema());
 
-        result.IsValid.Should().BeTrue(because: string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("discards");
+    }
+
+    [Fact]
+    public void Validate_AcceptsSetBorderOnAVerticalLinesOwnLeftEdge()
+    {
+        var schema = Schema();
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "Divider", Kind = "Line", LeftTwips = 500, TopTwips = 0, WidthTwips = 0, HeightTwips = 300
+        });
+
+        var accepted = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "Divider", Left = "dotted"
+        });
+        LayoutPlanValidator.Validate(accepted, schema).IsValid.Should().BeTrue();
+
+        // The mirror image of the horizontal case: a vertical line keeps LeftLineStyle and throws
+        // "top" away, so which side is legal depends on the line's own geometry, not on its kind.
+        var rejected = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "Divider", Top = "dotted"
+        });
+        LayoutPlanValidator.Validate(rejected, schema).IsValid.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("Line")]
+    [InlineData("Box")]
+    public void Validate_RejectsADoubleBorderOnADrawnObject(string kind)
+    {
+        // MEASURED: Crystal answers a double style on a Line or a Box with COMException "The line
+        // style value is not valid.", which would fault the session mid-plan and lose every
+        // operation after it. Rejected here, before anything is written. A Field, Text,
+        // FieldHeading or Subreport takes "double" happily -- also measured -- so this is a rule
+        // about the style, not a kind gate on the operation.
+        var schema = Schema();
+        schema.Sections[0].Objects.Add(new ObjectInfo
+        {
+            Name = "Drawn", Kind = kind, LeftTwips = 0, TopTwips = 0,
+            WidthTwips = 3000, HeightTwips = kind == "Line" ? 0 : 300
+        });
+
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = "Drawn", Top = "double"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, schema);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Message.Should().Contain("no double line style");
+    }
+
+    [Theory]
+    [InlineData("Field", "CustomerName")]
+    [InlineData("Text", "Title")]
+    [InlineData("FieldHeading", "StageNameHeading")]
+    public void Validate_AcceptsADoubleBorderOnATextBearingObject(string kind, string target)
+    {
+        var plan = PlanOf(new LayoutOperation
+        {
+            Action = LayoutActions.SetBorder, Target = target, Bottom = "double"
+        });
+
+        var result = LayoutPlanValidator.Validate(plan, Schema())
+            ;
+        result.IsValid.Should().BeTrue(
+            because: $"a {kind} takes a double border (measured); " +
+                     string.Join("; ", result.Errors.ConvertAll(e => e.Message)));
     }
 
     [Fact]

@@ -759,3 +759,80 @@ all read and write the report's own metadata. None of them walks
 database is unreachable (post-merge finding PM1) — which is why `AddGroup` resolves its field
 through `FindFieldByFormulaForm` rather than reusing `AddField`'s `ResolveDbField` walk. Grouping
 needs the field, not its value type.
+
+---
+
+## Object borders (measured 2026-09-02)
+
+`setBorder`'s findings, all established by set → `SaveAs` → reopen → `ReportReader.Read` against
+the installed 11.5 RAS, on scratch copies (the fixtures and `out/reports/` were never written to).
+Probing came first deliberately: `setNumberFormat` returned `ok` and persisted nothing for a whole
+review cycle, so "the applier did not throw" is not evidence that anything was written.
+
+### `ISCRBorder` needs no gate and no wholesale replacement — the good news first
+
+`ISCRReportObject.Border` mutates in place on the clone `ModifyObject` has already deep-copied, and
+all five properties (`LeftLineStyle`, `RightLineStyle`, `TopLineStyle`, `BottomLineStyle`,
+`BorderColor`) survive save and reopen exactly as written. Setting
+`left=single right=double top=dashed bottom=dotted color=#1F2A37` on `CardCode1` in
+`SampleReport.rpt` read back as precisely that.
+
+There is **no `EnableSystemDefault`-style gate** over the border, unlike `ISCRFieldFormat`
+(note: "The formatting operations"), and no need to assign a separately constructed border back onto
+the object, unlike what `FieldFormat` was suspected of needing. Sides not written are left alone, so
+a plan adding a bottom rule does not disturb an existing left divider.
+
+`BorderColor` is the same COLORREF `ColorRef` already handles, and its default on an untouched
+object is `0` → `#000000`, **not** the `0xFFFFFFFF` "no colour" sentinel that `FillColor` and
+section `BackgroundColor` carry. So an unset border colour reads as black rather than null.
+
+### `crLineStyleDouble` is not valid for a Line or a Box
+
+| Target kind | `double` |
+|---|---|
+| Field, Text, FieldHeading, Subreport | accepted, round-trips |
+| Line, Box | `COMException (0x8004201C): The line style value is not valid.` from `ReportObjectController.Modify` |
+
+The rejection is raised for a `double` on *any* of the four sides of a Line or a Box, including the
+three a Line ignores — `Modify` validates every style value before deciding what it keeps. This is
+Crystal's own line-style domain showing through: a drawn object has single/dashed/dotted (what the
+Designer's line-style dropdown offers) and no double.
+
+`LayoutPlanValidator` therefore rejects `double` on a Line or Box target before anything is written.
+That is **not** a kind allowlist on the operation — every kind still takes a border, Box and
+Subreport included — it is a rule about one style, and it exists because letting it through faults
+the session mid-plan and loses every remaining operation.
+
+### A Line's border IS the line, on the one edge it lies along
+
+Setting each of the four sides to each of the five styles on a horizontal line (`height = 0`) and on
+a vertical line (`width = 0`), saving and reopening each time:
+
+| Line | side written | kept? |
+|---|---|---|
+| horizontal | `top` | **yes** — `none`, `single`, `dashed`, `dotted` all round-trip |
+| horizontal | `left`, `right`, `bottom` | no — accepted, reported `ok`, discarded on save |
+| vertical | `left` | **yes** |
+| vertical | `top`, `right`, `bottom` | no — same silent discard |
+
+A freshly added Line reads back `top=single` (horizontal) or `left=single` (vertical): its own
+style, exposed through the border. Writing the other three sides is exactly the silent no-op this
+project has been burned by before, so the validator rejects them, choosing the legal side from the
+object's own geometry (`Height == 0` → `top`, else `left`). The rejection message points at the
+better answer: if the caller wants a rule that grows with a cell, the border belongs on the Text or
+Field object and the Line should not be drawn at all.
+
+### A freshly added Box arrives with all four sides `single`
+
+`addBox` produces an object whose border already reads `single` on every side — that outline is the
+box. It is not something `setBorder` did, and a test asserting "all four sides single" after
+bordering a new Box would pass without the applier touching anything. Per-side values are honoured
+on a Box regardless (`left=single right=none top=dotted bottom=none` round-trips), so there is no
+forced-uniformity rule; only `double` is refused.
+
+### Subreport takes a full border
+
+Measured on `out/reports/PMSV10_IndDetailedEval.rpt`'s `Subreport3` (read as the source, written to
+a scratch path): all four sides plus the colour round-trip, `double` included. This is the kind
+`CanGrowKinds` wrongly omitted and whose omission caused the defect `setBorder` exists to fix, so it
+was checked explicitly rather than assumed.

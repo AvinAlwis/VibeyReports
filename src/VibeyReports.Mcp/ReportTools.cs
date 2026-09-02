@@ -234,6 +234,11 @@ public sealed class ReportTools
         the field itself - typically left+right+bottom on each cell - and the grid grows with the
         row. It applies to every object kind, including Box and Subreport, and each side you omit
         is left as it is, so you can add a bottom rule without disturbing an existing divider.
+        Two measured limits, both rejected up front rather than at COM: a Line or a Box has no
+        "double" style (use single, dashed or dotted, or put the double border on a Text or Field),
+        and a Line's border IS the line, so only the edge it lies on counts - "top" for a
+        horizontal line, "left" for a vertical one, with the other three silently discarded by
+        Crystal. Every other kind, Subreport included, takes all four sides and all five styles.
         Borders read back through read_report as each object's "border".
         All coordinates are twips (1440 = 1 inch).
         Layout, data-source bindings, grouping and sorting only: database connections, SQL,

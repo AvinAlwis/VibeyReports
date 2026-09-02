@@ -1907,6 +1907,139 @@ public class LayoutApplierTests
         finally { if (File.Exists(saved)) File.Delete(saved); }
     }
 
+    [Fact]
+    public void Apply_SetsAllFourBorderSidesAndAColourAndEverySurvivesSaveAndReopen()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetBorder, Target = "CardCode1",
+                    Left = "single", Right = "double", Top = "dashed", Bottom = "dotted",
+                    Color = "#1F2A37"
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            // The same five properties the operation writes -- not a neighbouring one. This
+            // project's setNumberFormat no-op survived its first test precisely because the
+            // assertion looked at a property the applier never touched.
+            var border = FindObject(schema, "CardCode1").Border;
+            border.Should().NotBeNull();
+            border!.Left.Should().Be("single");
+            border.Right.Should().Be("double");
+            border.Top.Should().Be("dashed");
+            border.Bottom.Should().Be("dotted");
+            border.ColorHex.Should().Be("#1F2A37");
+
+            // No spill onto a neighbour: a border belongs to one object.
+            FindObject(schema, "CardName1").Border!.Left.Should().Be("none");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    [Fact]
+    public void Apply_SetsOnlyTheBottomBorderAndLeavesTheOtherThreeAlone()
+    {
+        var plan = new LayoutPlan
+        {
+            Operations =
+            {
+                new LayoutOperation
+                {
+                    Action = LayoutActions.SetBorder, Target = "CardName1", Bottom = "single"
+                }
+            }
+        };
+
+        var schema = ApplyAndReread(plan, out var saved);
+        try
+        {
+            // The row rule of a bordered table: a bottom edge only, added without disturbing
+            // anything else the object already had.
+            var border = FindObject(schema, "CardName1").Border;
+            border.Should().NotBeNull();
+            border!.Bottom.Should().Be("single");
+            border.Left.Should().Be("none");
+            border.Right.Should().Be("none");
+            border.Top.Should().Be("none");
+        }
+        finally { if (File.Exists(saved)) File.Delete(saved); }
+    }
+
+    /// <summary>
+    /// The two limits measured while scoping setBorder, both of which the validator now rejects
+    /// before anything is written. This test pins the MEASUREMENTS themselves by driving the
+    /// applier directly through the internal seam: if a future Crystal build starts accepting a
+    /// double border on a Box, or starts honouring a horizontal line's bottom edge, this test goes
+    /// red and the validator rules can be relaxed on evidence rather than on hope.
+    /// </summary>
+    [Fact]
+    public void Apply_MeasuresCrystalsTwoBorderLimitsOnDrawnObjects()
+    {
+        var source = Fixtures.SampleReport;
+        var sourceBefore = File.ReadAllBytes(source);
+        var dest = TempRpt();
+
+        try
+        {
+            using (var session = CrystalSession.Open(source))
+            {
+                // A Line and a Box refuse crLineStyleDouble outright.
+                var doubleOnBox = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.AddBox, Section = "DetailSection1", NewName = "Framed",
+                            LeftTwips = 100, TopTwips = 10, WidthTwips = 900, HeightTwips = 200
+                        },
+                        new LayoutOperation { Action = LayoutActions.SetBorder, Target = "Framed", Top = "double" }
+                    }
+                };
+
+                Assert.Throws<System.Runtime.InteropServices.COMException>(
+                    () => LayoutApplier.ApplyOperationsWithoutValidation(session, doubleOnBox));
+            }
+
+            // A horizontal line keeps only its top edge; a bottom written here is discarded on
+            // save with no exception and no complaint, which is why the validator refuses it.
+            using (var session = CrystalSession.Open(source))
+            {
+                LayoutApplier.ApplyOperationsWithoutValidation(session, new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.AddLine, Section = "DetailSection1", NewName = "Rule1",
+                            LeftTwips = 100, TopTwips = 200, WidthTwips = 900, HeightTwips = 0
+                        },
+                        new LayoutOperation { Action = LayoutActions.SetBorder, Target = "Rule1", Bottom = "dashed" }
+                    }
+                });
+                session.SaveAs(dest, overwrite: false);
+            }
+
+            using var reopened = CrystalSession.Open(dest);
+            var line = FindObject(ReportReader.Read(reopened), "Rule1").Border;
+            line!.Bottom.Should().Be("none", because: "Crystal discards a horizontal line's bottom edge");
+            line.Top.Should().Be("single", because: "a horizontal line's border IS the line, on its top edge");
+        }
+        finally
+        {
+            File.ReadAllBytes(source).Should().Equal(sourceBefore,
+                because: "the source report must never be modified");
+            if (File.Exists(dest)) File.Delete(dest);
+        }
+    }
+
     /// <summary>
     /// setSuppress's other host. EnableSuppress is one Crystal property on two different format
     /// types, which is why this is one operation rather than two -- and why both paths need
