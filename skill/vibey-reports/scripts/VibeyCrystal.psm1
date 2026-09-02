@@ -186,14 +186,25 @@ function Save-VibeyDocument {
 
         Writes to a temporary name in the destination directory and moves on success, so a
         save that fails partway cannot leave a corrupt file where the caller asked for output.
+
+        FIX (round 1): the move itself can still fail (destination locked by the Designer, an
+        AV scan holding the handle, a permissions problem) - that left the temp file behind
+        permanently, under a name nobody would recognise as garbage. The move is now wrapped so
+        a failed move deletes the temp file before rethrowing; the caller still sees the error.
     #>
     param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)][string]$OutputPath)
     $dir = [IO.Path]::GetDirectoryName($OutputPath)
     if (-not $dir) { $dir = (Get-Location).Path }
     if (-not (Test-Path -LiteralPath $dir)) { throw "Output directory does not exist: $dir" }
     $tmpName = 'vibey-' + [Guid]::NewGuid().ToString('N') + '.rpt'
+    $tmpPath = Join-Path $dir $tmpName
     $Doc.SaveAs($tmpName, $dir, 0)          # 0 = crReportOptionDefault
-    Move-Item -LiteralPath (Join-Path $dir $tmpName) -Destination $OutputPath -Force
+    try {
+        Move-Item -LiteralPath $tmpPath -Destination $OutputPath -Force
+    } catch {
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Find-VibeyObject {

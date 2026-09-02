@@ -76,3 +76,23 @@ It 'resizes a section and reports the new height' {
     $s = $after.sections | Where-Object { $_.name -eq 'DetailSection1' }
     Should-Be $s.heightTwips 1200 'section height'
 }
+
+It 'cleans up the temp file when the destination move fails' {
+    $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
+    $t = First-FontableObject $before
+    $out = Join-Path $scratch 'locked.rpt'
+    if (Test-Path $out) { Remove-Item $out -Force }
+    # Create the destination and hold an exclusive handle on it so Move-Item's rename fails.
+    $stream = [IO.File]::Open($out, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $r = Invoke-Vibey @{ command='apply'; reportPath=$fixture; outputPath=$out; overwrite=$true
+                             plan = @{ planVersion=1; operations=@(
+                                @{ action='move'; target=$t.name; leftTwips=($t.leftTwips + 60); topTwips=$t.topTwips }) } }
+        Should-Be $r.ok $false 'ok'
+        $leaked = Get-ChildItem -LiteralPath $scratch -Filter 'vibey-*.rpt' -ErrorAction SilentlyContinue
+        if ($leaked) { throw "temp file(s) leaked in the destination directory: $($leaked.Name -join ', ')" }
+    } finally {
+        $stream.Close()
+        if (Test-Path $out) { Remove-Item $out -Force }
+    }
+}
