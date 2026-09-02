@@ -19,12 +19,20 @@ TestResults/
 # into docs/briefs/ so the reasoning behind each feature travels with the repo)
 .superpowers/
 
-# Generated report artifacts. Most are regenerable via out/scripts/, but the base
-# reports were hand-made in the Crystal Designer and cannot be. Keep the .rpt
-# deliverables and the generators; drop the JSON plans and the dated backups.
+# Generated report artifacts stay LOCAL. Two reasons: they are rebuilt from
+# out/scripts/ on demand, and previewing one makes Crystal save live employee
+# rows into the .rpt - which must not reach a git remote.
+#
+# The hand-made INPUTS are tracked, because nothing can rebuild them:
+#   _shell_*.rpt              blank shells; _shell_overview.rpt carries the
+#                             extra Details sections added in the Designer
+#   Report1.rpt               the hand-made blank every shell was rebound from
+#   PMSV10_IndPerfOverview.*  a colleague's report, kept as a style reference
 out/**
 !out/
-!out/reports/
-!out/reports/*.rpt
 !out/scripts/
 !out/scripts/*.ps1
+!out/reports/
+!out/reports/_shell_*.rpt
+!out/reports/Report1.rpt
+!out/reports/PMSV10_IndPerfOverview*.rpt

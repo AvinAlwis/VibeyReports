@@ -99,7 +99,8 @@ validator's error message lists actions that the source clearly contains.
   documentation. Trust this over any Crystal reference you find online.
 - `docs/superpowers/plans/` and `docs/briefs/` — the original plan and the per-task
   briefs, kept so the reasoning behind each feature is portable.
-- `out/reports/` — the generated `.rpt` deliverables and hand-made base reports.
+- `out/reports/` — hand-made shells and base reports ARE tracked; generated `.rpt` outputs are
+  local only, because a preview saves live employee rows into the file.
 - `out/scripts/` — the PowerShell generators that build those reports from a base.
 
 Note that some `out/reports/` files are **not** regenerable: `Report1.rpt` and the
