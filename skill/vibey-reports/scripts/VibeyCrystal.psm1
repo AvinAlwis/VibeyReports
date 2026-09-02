@@ -75,6 +75,27 @@ function ConvertFrom-VibeyObjectKind {
     }
 }
 
+function Get-VibeyComProperty {
+    <#
+        MEASURED: PowerShell's normal dot-notation property GET/SET fails silently (no
+        exception, just returns/leaves $null) on ISCRFont ("CrystalDecisions.ReportAppServer.
+        ReportDefModel.Font") reached through FontColor.Font -- even for a value it just wrote
+        moments earlier in the very same variable. Reflection's InvokeMember against the COM
+        object's runtime type works correctly for both get and set on this object every time it
+        was checked (Name/Size/Bold), including across a Clone -> Modify -> SaveAs -> reopen
+        round trip. Plain Left/Top/Width/Height on the report object itself are unaffected --
+        this quirk is specific to this nested Font COM object, so only its accessors route
+        through here rather than converting every property access in the module.
+    #>
+    param([Parameter(Mandatory)]$ComObject, [Parameter(Mandatory)][string]$Name)
+    return $ComObject.GetType().InvokeMember($Name, [Reflection.BindingFlags]::GetProperty, $null, $ComObject, @())
+}
+
+function Set-VibeyComProperty {
+    param([Parameter(Mandatory)]$ComObject, [Parameter(Mandatory)][string]$Name, $Value)
+    $ComObject.GetType().InvokeMember($Name, [Reflection.BindingFlags]::SetProperty, $null, $ComObject, @($Value)) | Out-Null
+}
+
 function Get-VibeyObjectInfo {
     param([Parameter(Mandatory)]$ReportObject)
     $o = $ReportObject
@@ -85,16 +106,21 @@ function Get-VibeyObjectInfo {
         text = $null; dataSource = $null
         fontName = $null; fontSizePt = $null; bold = $null
     }
-    # MEASURED: fonts are reached through FontColor.Font. On SampleReport.rpt's own objects,
-    # none carry an explicitly-set font (they inherit the report's default), so Name/Size/Bold
-    # come back as null there -- that is a legitimate "not explicitly set" reading, not a
-    # broken accessor, which is why this is left as null rather than defaulted to a guess.
+    # Fonts are reached through FontColor.Font, and read via Get-VibeyComProperty (see its
+    # comment) rather than dot notation. On SampleReport.rpt's own objects, none carry an
+    # explicitly-set font (they inherit the report's default), so Name/Size/Bold legitimately
+    # come back null there -- not a broken accessor -- which is why this is left as null rather
+    # than defaulted to a guess.
     $fc = $null
     try { $fc = $o.FontColor } catch { }
     if ($fc -and $fc.Font) {
-        if ($null -ne $fc.Font.Name)  { $info.fontName   = $fc.Font.Name }
-        if ($null -ne $fc.Font.Size)  { $info.fontSizePt = [double]$fc.Font.Size }
-        if ($null -ne $fc.Font.Bold)  { $info.bold       = [bool]$fc.Font.Bold }
+        $font = $fc.Font
+        $fontName = Get-VibeyComProperty -ComObject $font -Name 'Name'
+        $fontSize = Get-VibeyComProperty -ComObject $font -Name 'Size'
+        $fontBold = Get-VibeyComProperty -ComObject $font -Name 'Bold'
+        if ($null -ne $fontName) { $info.fontName   = $fontName }
+        if ($null -ne $fontSize) { $info.fontSizePt = [double]$fontSize }
+        if ($null -ne $fontBold) { $info.bold       = [bool]$fontBold }
     }
     try { if ($o.Text)       { $info.text       = $o.Text } }       catch { }
     try { if ($o.DataSource) { $info.dataSource = $o.DataSource } } catch { }
@@ -152,6 +178,150 @@ function Invoke-VibeyRead {
     return @{ ok = $true; schema = (Get-VibeySchema -Path $Request.reportPath) }
 }
 
-function Invoke-VibeyApply { param([Parameter(Mandatory)]$Request) @{ ok = $false; error = 'apply not implemented' } }
+function Save-VibeyDocument {
+    <#
+        MEASURED: SaveAs takes (name, directory, options) - THREE arguments. It is not
+        SaveAs(path, overwrite); that overload does not exist and fails with
+        "Cannot find an overload for SaveAs and the argument count: 2".
 
-Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply
+        Writes to a temporary name in the destination directory and moves on success, so a
+        save that fails partway cannot leave a corrupt file where the caller asked for output.
+    #>
+    param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)][string]$OutputPath)
+    $dir = [IO.Path]::GetDirectoryName($OutputPath)
+    if (-not $dir) { $dir = (Get-Location).Path }
+    if (-not (Test-Path -LiteralPath $dir)) { throw "Output directory does not exist: $dir" }
+    $tmpName = 'vibey-' + [Guid]::NewGuid().ToString('N') + '.rpt'
+    $Doc.SaveAs($tmpName, $dir, 0)          # 0 = crReportOptionDefault
+    Move-Item -LiteralPath (Join-Path $dir $tmpName) -Destination $OutputPath -Force
+}
+
+function Find-VibeyObject {
+    param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)][string]$Name)
+    foreach ($entry in (Get-VibeySectionList -Doc $Doc)) {
+        foreach ($ro in $entry.Section.ReportObjects) {
+            if ($ro.Name -eq $Name) { return @{ Object = $ro; Section = $entry.Section } }
+        }
+    }
+    throw "Object `"$Name`" was not found; the validator should have rejected it."
+}
+
+function Find-VibeySection {
+    param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)][string]$Name)
+    foreach ($entry in (Get-VibeySectionList -Doc $Doc)) {
+        if ($entry.Name -eq $Name) { return $entry.Section }
+    }
+    throw "Section `"$Name`" was not found; the validator should have rejected it."
+}
+
+function Set-VibeyObject {
+    <#
+        MEASURED: RAS objects cannot be mutated in place - setting a property on the live
+        object does not persist. Clone, change the clone, then Modify(old, new).
+    #>
+    param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)]$Original, [Parameter(Mandatory)]$Modified)
+    $Doc.ReportDefController.ReportObjectController.Modify($Original, $Modified)
+}
+
+function Invoke-VibeyApply {
+    param([Parameter(Mandatory)]$Request)
+
+    foreach ($required in 'reportPath','outputPath') {
+        if (-not $Request.$required) { return @{ ok = $false; error = "`"apply`" requires `"$required`"." } }
+    }
+    if ((Test-Path -LiteralPath $Request.outputPath) -and -not $Request.overwrite) {
+        return @{ ok = $false; error = "Output file already exists and `"overwrite`" was not set: $($Request.outputPath)" }
+    }
+    if ([IO.Path]::GetFullPath($Request.reportPath) -eq [IO.Path]::GetFullPath($Request.outputPath)) {
+        return @{ ok = $false; error = 'outputPath must differ from reportPath; the source report is never modified.' }
+    }
+
+    # THE GATE. Nothing below this line runs unless the whole plan passes.
+    $schema = Get-VibeySchema -Path $Request.reportPath
+    $check  = Test-VibeyPlan -Plan $Request.plan -Schema $schema
+    if (-not $check.IsValid) {
+        return @{ ok = $false; error = 'Layout plan failed validation.'
+                  validationErrors = @($check.Errors | ForEach-Object { @{ operationIndex = $_.OperationIndex; message = $_.Message } }) }
+    }
+
+    $rd = Open-VibeyDocument -Path $Request.reportPath
+    $removedObjects = @()
+    try {
+        $doc = $rd.ReportClientDocument
+        $n = 0
+        foreach ($op in $Request.plan.operations) {
+            $n++
+            switch ([string]$op.action) {
+                'resizeSection' {
+                    <#
+                        MEASURED: ReportSectionController has no Modify method (the brief's
+                        guess) -- printing its members shows only Add(section, area, index),
+                        Remove(section), AutoFitSections(variant) and SetProperty(section,
+                        CrReportSectionPropertyEnum, variant). There is no clone/mutate/Modify
+                        dance for a section; SetProperty mutates the live section in place, and
+                        that mutation is what survives SaveAs. CrReportSectionPropertyEnum was
+                        reflected from CrystalDecisions.ReportAppServer.Controllers (a different
+                        namespace than the ReportDefModel enums used elsewhere in this file):
+                        crReportSectionPropertyName=0, ...Format=1, ...Height=2.
+                    #>
+                    $sec = Find-VibeySection -Doc $doc -Name $op.section
+                    $doc.ReportDefController.ReportSectionController.SetProperty($sec, 2, [int]$op.heightTwips)
+                }
+                'move' {
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $clone.Left = [int]$op.leftTwips; $clone.Top = [int]$op.topTwips
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                'resize' {
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $clone.Width = [int]$op.widthTwips; $clone.Height = [int]$op.heightTwips
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                'setAlignment' {
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $clone.Format.HorizontalAlignment = switch ([string]$op.alignment) {
+                        'Left' { 1 } 'Centre' { 2 } 'Center' { 2 } 'Right' { 3 } 'Justified' { 4 }
+                    }
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                { $_ -in 'setFont','setFontSize','setBold' } {
+                    <#
+                        MEASURED: the font is ISCRFont with a DECIMAL Size, reached through
+                        FontColor.Font -- confirmed. NOT measured (and wrong) was the brief's
+                        assumption that plain dot-notation ($font.Size = ...) sets and reads it.
+                        Dot-notation SET on this object silently no-ops (no exception, value
+                        just never sticks, even read back one line later in the same variable);
+                        dot-notation GET likewise always returns $null, even for a value that
+                        WAS actually written (verified via a second, InvokeMember-based read).
+                        reflection's InvokeMember against the object's runtime type works for
+                        both directions and survives Modify -> SaveAs -> reopen. See
+                        Set-VibeyComProperty. No reassignment of FontColor.Font back onto the
+                        clone is needed -- mutating the Font object in place is retained by the
+                        same clone (reference identity confirmed with
+                        [object]::ReferenceEquals across a re-fetch).
+                    #>
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $font = $clone.FontColor.Font
+                    if ($op.action -eq 'setFont')     { Set-VibeyComProperty -ComObject $font -Name 'Name' -Value ([string]$op.fontName) }
+                    if ($op.action -eq 'setFontSize') { Set-VibeyComProperty -ComObject $font -Name 'Size' -Value ([decimal]$op.fontSizePt) }
+                    if ($op.action -eq 'setBold')     { Set-VibeyComProperty -ComObject $font -Name 'Bold' -Value ([bool]$op.bold) }
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                default {
+                    throw "`"$($op.action)`" passed validation but has no applier arm yet (operation $n)."
+                }
+            }
+        }
+        Save-VibeyDocument -Doc $doc -OutputPath $Request.outputPath
+    } finally { $rd.Close() }
+
+    return @{ ok = $true; operationsApplied = @($Request.plan.operations).Count
+              removedObjects = $removedObjects
+              schema = (Get-VibeySchema -Path $Request.outputPath) }
+}
+
+Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply, Save-VibeyDocument, Find-VibeyObject, Find-VibeySection, Set-VibeyObject, Get-VibeyComProperty, Set-VibeyComProperty

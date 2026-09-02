@@ -920,3 +920,80 @@ Measured on `out/reports/PMSV10_IndDetailedEval.rpt`'s `Subreport3` (read as the
 a scratch path): all four sides plus the colour round-trip, `double` included. This is the kind
 `CanGrowKinds` wrongly omitted and whose omission caused the defect `setBorder` exists to fix, so it
 was checked explicitly rather than assumed.
+
+---
+
+## PowerShell skill's apply path (measured 2026-09-02)
+
+Measured while implementing `Invoke-VibeyApply` in `skill/vibey-reports/scripts/VibeyCrystal.psm1`,
+against `SampleReport.rpt` through the same x86 `powershell.exe` used for the read path.
+
+### `ReportSectionController` has no `Modify` — the brief's `resizeSection` code was wrong
+
+The brief's `resizeSection` arm called `$doc.ReportDefController.ReportSectionController.Modify($sec,
+$clone)`, the same clone-mutate-Modify pattern used for report objects. Printing
+`$doc.ReportDefController.ReportSectionController | Get-Member` shows no `Modify` at all — the real
+members are `Add(ISCRSection, ISCRArea, int)`, `Remove(ISCRSection)`, `AutoFitSections(Variant)` and
+`SetProperty(ISCRSection, CrReportSectionPropertyEnum, Variant)`. There is no clone step for a
+section: `SetProperty` mutates the live section object in place, and that in-place mutation is what
+`SaveAs` persists — confirmed end to end (`SetProperty($sec, 2, 1200)` then `SaveAs` then reopen
+reports `heightTwips = 1200`).
+
+`CrReportSectionPropertyEnum` lives in a different namespace than the area/object-kind enums used by
+the read path (`CrystalDecisions.ReportAppServer.Controllers`, not `...ReportDefModel`). Reflecting it
+gives `crReportSectionPropertyName=0`, `crReportSectionPropertyFormat=1`,
+`crReportSectionPropertyHeight=2` — `resizeSection` passes `2`.
+
+### Dot-notation property access on `ISCRFont` silently no-ops for both get AND set — corrects the task-2 note above
+
+The task-2 note above ("Font properties on an object with no explicitly-set font come back `$null`,
+not an accessor failure") is half right and half wrong. It's right that `$null` isn't itself proof of
+brokenness. It's wrong that dot-notation access on `FontColor.Font` is reliable — it was only ever
+tested against objects with no explicit font, where `$null` was also the correct answer, so the test
+couldn't distinguish "accessor broken" from "value genuinely absent".
+
+Measured directly this time, on a clone whose font WAS just written:
+
+```powershell
+$font = $clone.FontColor.Font
+$font.Size = [decimal]14      # no exception
+$font.Size                    # -> $null, immediately, same variable, same line of script
+```
+
+Setting `Name` (string) and `Bold` (bool) the same way shows the identical symptom — this is not a
+`Decimal`/`VT_DECIMAL` marshaling quirk, it is dot-notation property get/set on this specific COM
+object (`CrystalDecisions.ReportAppServer.ReportDefModel.Font`) not working through PowerShell's
+member adapter, full stop. No exception is thrown in either direction; the set is a silent no-op and
+the get silently returns `$null` regardless of the object's real value.
+
+Reflection's `Type.InvokeMember` against the object's runtime type works correctly for both
+directions, and the value it writes survives `Clone` → `ReportObjectController.Modify` → `SaveAs` →
+reopen:
+
+```powershell
+$t = $font.GetType()
+$t.InvokeMember('Size', [Reflection.BindingFlags]::SetProperty, $null, $font, @([decimal]14))
+$t.InvokeMember('Size', [Reflection.BindingFlags]::GetProperty, $null, $font, @())   # -> 14
+```
+
+`VibeyCrystal.psm1` adds `Get-VibeyComProperty`/`Set-VibeyComProperty` (thin `InvokeMember` wrappers)
+and routes every `Font.Name`/`Font.Size`/`Font.Bold` read (`Get-VibeyObjectInfo`, used by the read
+path too) and write (`setFont`/`setFontSize`/`setBold` in `Invoke-VibeyApply`) through them instead of
+dot notation. Plain scalar properties on the report object itself (`Left`/`Top`/`Width`/`Height`) are
+unaffected by this — those already round-tripped correctly through ordinary dot notation (`move` and
+`resize` both passed before this fix was needed) — so only the nested `Font` object's accessors were
+changed; nothing else in the module was converted speculatively.
+
+Also confirmed unnecessary: reassigning `$clone.FontColor.Font = $font` after mutating `$font` in
+place. `$font` retrieved from `$clone.FontColor.Font` keeps its identity (`[object]::ReferenceEquals`
+confirmed the same RCW is returned on a later fetch through the same clone), so the mutated object is
+already linked into the clone that gets passed to `ReportObjectController.Modify`.
+
+### `SaveAs` output is genuinely correct; a wrong read was the earlier false negative
+
+Before finding the `InvokeMember` fix, a save → reopen → dot-notation-read of a just-set font size
+looked exactly like a *save* failure (`fontSizePt` came back blank after a real round trip through
+disk). Isolating it — reopening the saved file and reading the same property via `InvokeMember`
+instead — showed `14` was on disk correctly the whole time. Worth recording because the failure mode
+(blank value after save+reopen) is the same symptom a genuine serialization bug would produce; the
+fix here is entirely on the read side, not the write/save side.
