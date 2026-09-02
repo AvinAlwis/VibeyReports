@@ -105,6 +105,7 @@ function Get-VibeyObjectInfo {
         widthTwips = [int]$o.Width; heightTwips = [int]$o.Height
         text = $null; dataSource = $null
         fontName = $null; fontSizePt = $null; bold = $null
+        decimalPlaces = $null; thousandsSeparator = $null
     }
     # Fonts are reached through FontColor.Font, and read via Get-VibeyComProperty (see its
     # comment) rather than dot notation. On SampleReport.rpt's own objects, none carry an
@@ -124,6 +125,21 @@ function Get-VibeyObjectInfo {
     }
     try { if ($o.Text)       { $info.text       = $o.Text } }       catch { }
     try { if ($o.DataSource) { $info.dataSource = $o.DataSource } } catch { }
+    # Number format is reached through FieldFormat.NumericFormat -- nested COM objects the same
+    # way FontColor.Font is (see Get-VibeyComProperty's comment), so read via reflection rather
+    # than dot notation. Only a Field carries FieldFormat/NumericFormat.
+    if ($info.kind -eq 'Field') {
+        try {
+            $ff = $o.FieldFormat
+            if ($ff -and $ff.NumericFormat) {
+                $nf = $ff.NumericFormat
+                $dp = Get-VibeyComProperty -ComObject $nf -Name 'NDecimalPlaces'
+                $ts = Get-VibeyComProperty -ComObject $nf -Name 'ThousandsSeparator'
+                if ($null -ne $dp) { $info.decimalPlaces = [int]$dp }
+                if ($null -ne $ts) { $info.thousandsSeparator = [bool]$ts }
+            }
+        } catch { }
+    }
     return $info
 }
 
@@ -232,6 +248,22 @@ function Set-VibeyObject {
     #>
     param([Parameter(Mandatory)]$Doc, [Parameter(Mandatory)]$Original, [Parameter(Mandatory)]$Modified)
     $Doc.ReportDefController.ReportObjectController.Modify($Original, $Modified)
+}
+
+function ConvertTo-VibeyColorRef {
+    <#
+        MEASURED (cross-checked against the C# reference's ColorRef.FromHex): Crystal stores
+        colour as COLORREF, 0x00BBGGRR - the byte order is REVERSED from HTML hex. Feeding
+        0xRRGGBB straight through swaps red and blue, which renders as a plausible wrong colour
+        rather than an error.
+    #>
+    param([Parameter(Mandatory)][string]$Hex)
+    $h = $Hex.TrimStart('#')
+    if ($h.Length -ne 6) { throw "Colour must be six hex digits, was `"$Hex`"." }
+    $r = [Convert]::ToInt32($h.Substring(0,2),16)
+    $g = [Convert]::ToInt32($h.Substring(2,2),16)
+    $b = [Convert]::ToInt32($h.Substring(4,2),16)
+    return (($b -shl 16) -bor ($g -shl 8) -bor $r)
 }
 
 function New-VibeyDefaultFontColor {
@@ -489,6 +521,110 @@ function Invoke-VibeyApply {
                     $doc.ReportDefController.ReportObjectController.Remove($f.Object)
                     $removedObjects += [string]$op.target
                 }
+                { $_ -in 'setTextColor','setFillColor','setLineColor' } {
+                    <#
+                        FillColor/LineColor are plain top-level properties on the clone (same
+                        idiom as Left/Top/Width/Height elsewhere in this file) and dot-notation
+                        works fine there. FontColor.Color is a nested COM object property one
+                        level in, the same shape as the measured FontColor.Font quirk, so it is
+                        written through Set-VibeyComProperty rather than trusted to dot notation.
+                    #>
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $colorRef = ConvertTo-VibeyColorRef -Hex ([string]$op.color)
+                    switch ([string]$op.action) {
+                        'setTextColor' { Set-VibeyComProperty -ComObject $clone.FontColor -Name 'Color' -Value $colorRef }
+                        'setFillColor' { $clone.FillColor = $colorRef }
+                        'setLineColor' { $clone.LineColor = $colorRef }
+                    }
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                { $_ -in 'setSectionBackground','setSectionBreak','setSuppress' -and $op.section } {
+                    <#
+                        MEASURED: ReportSectionController has no Modify method (confirmed in
+                        Task 4 -- resizeSection above is the working reference). Section-level
+                        format changes go through the same SetProperty(section,
+                        CrReportSectionPropertyEnum, value) call resizeSection uses, but with the
+                        Format member (=1) instead of Height (=2): clone section.Format, mutate
+                        the clone, push it back with SetProperty(section, 1, clone). Assigning to
+                        section.Format in place does not persist, the same reason report objects
+                        go through Clone/Modify rather than in-place mutation.
+
+                        section.Format's own properties (BackgroundColor, EnableSuppress, ...)
+                        are written through Set-VibeyComProperty rather than dot notation --
+                        ISCRSectionFormat is a nested COM object one level in from the section,
+                        the same shape as the measured FontColor.Font/FieldFormat quirks.
+                    #>
+                    $sec = Find-VibeySection -Doc $doc -Name $op.section
+                    $clone = $sec.Format.Clone($true)
+                    switch ([string]$op.action) {
+                        'setSectionBackground' {
+                            Set-VibeyComProperty -ComObject $clone -Name 'BackgroundColor' -Value (ConvertTo-VibeyColorRef -Hex ([string]$op.color))
+                        }
+                        'setSectionBreak' {
+                            if ($null -ne $op.newPageBefore) { Set-VibeyComProperty -ComObject $clone -Name 'EnableNewPageBefore' -Value ([bool]$op.newPageBefore) }
+                            if ($null -ne $op.newPageAfter)  { Set-VibeyComProperty -ComObject $clone -Name 'EnableNewPageAfter'  -Value ([bool]$op.newPageAfter) }
+                        }
+                        'setSuppress' {
+                            Set-VibeyComProperty -ComObject $clone -Name 'EnableSuppress' -Value ([bool]$op.suppress)
+                            if ($null -ne $op.suppressIfBlank) { Set-VibeyComProperty -ComObject $clone -Name 'EnableSuppressIfBlank' -Value ([bool]$op.suppressIfBlank) }
+                        }
+                    }
+                    $doc.ReportDefController.ReportSectionController.SetProperty($sec, 1, $clone)
+                }
+                { $_ -in 'setCanGrow','setSuppress' -and $op.target } {
+                    <#
+                        ISCRObjectFormat (EnableCanGrow, EnableSuppress) is reached through
+                        clone.Format -- a nested COM object one level in, same shape as the
+                        measured FontColor.Font/FieldFormat quirks -- so written through
+                        Set-VibeyComProperty rather than dot notation.
+                    #>
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    if ($op.action -eq 'setCanGrow') {
+                        Set-VibeyComProperty -ComObject $clone.Format -Name 'EnableCanGrow' -Value ([bool]$op.canGrow)
+                    } else {
+                        Set-VibeyComProperty -ComObject $clone.Format -Name 'EnableSuppress' -Value ([bool]$op.suppress)
+                    }
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
+                'setNumberFormat' {
+                    <#
+                        MEASURED, and the reason a first attempt at this silently did nothing:
+                        while FieldFormat.CommonFormat.EnableSystemDefault is true -- and it is
+                        true on every field of every fixture -- Crystal formats the field from
+                        locale defaults and DISCARDS NDecimalPlaces/ThousandsSeparator on save.
+                        The apply still returns ok and nothing changes. Clearing the gate first
+                        is what makes the explicit format persist.
+
+                        EnableSuppressIfZero persists even with the gate left on, which is
+                        exactly how a half-working operation hides behind a test that only checks
+                        that one property -- so this always clears the gate regardless of which
+                        of the three the caller supplied.
+
+                        RoundingFormat rounds independently of NDecimalPlaces (measured:
+                        RoundingFormat = 11 - decimalPlaces across the validator's 0-10 range) --
+                        left out of step, the value is rounded to a different precision than it
+                        is displayed at.
+
+                        FieldFormat/CommonFormat/NumericFormat are all nested COM objects, the
+                        same shape as the measured FontColor.Font quirk, so every write here goes
+                        through Set-VibeyComProperty rather than dot notation. No reassignment of
+                        FieldFormat back onto the clone is needed -- mutating the nested object in
+                        place is retained by the clone, same as the font case.
+                    #>
+                    $f = Find-VibeyObject -Doc $doc -Name $op.target
+                    $clone = $f.Object.Clone($true)
+                    $fmt = $clone.FieldFormat
+                    Set-VibeyComProperty -ComObject $fmt.CommonFormat -Name 'EnableSystemDefault' -Value $false
+                    if ($null -ne $op.decimalPlaces) {
+                        Set-VibeyComProperty -ComObject $fmt.NumericFormat -Name 'NDecimalPlaces' -Value ([int]$op.decimalPlaces)
+                        Set-VibeyComProperty -ComObject $fmt.NumericFormat -Name 'RoundingFormat' -Value (11 - [int]$op.decimalPlaces)
+                    }
+                    if ($null -ne $op.thousandsSeparator) { Set-VibeyComProperty -ComObject $fmt.NumericFormat -Name 'ThousandsSeparator'   -Value ([bool]$op.thousandsSeparator) }
+                    if ($null -ne $op.suppressIfZero)     { Set-VibeyComProperty -ComObject $fmt.NumericFormat -Name 'EnableSuppressIfZero' -Value ([bool]$op.suppressIfZero) }
+                    Set-VibeyObject -Doc $doc -Original $f.Object -Modified $clone
+                }
                 default {
                     throw "`"$($op.action)`" passed validation but has no applier arm yet (operation $n)."
                 }
@@ -502,4 +638,4 @@ function Invoke-VibeyApply {
               schema = (Get-VibeySchema -Path $Request.outputPath) }
 }
 
-Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply, Save-VibeyDocument, Find-VibeyObject, Find-VibeySection, Set-VibeyObject, Get-VibeyComProperty, Set-VibeyComProperty
+Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply, Save-VibeyDocument, Find-VibeyObject, Find-VibeySection, Set-VibeyObject, Get-VibeyComProperty, Set-VibeyComProperty, ConvertTo-VibeyColorRef, New-VibeyDefaultFontColor

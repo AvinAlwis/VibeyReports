@@ -1116,3 +1116,65 @@ Unlike `move`/`resize`/`setFont*` (Clone → mutate → `Modify(old, new)`),
 `ReportObjectController.Remove(ISCRReportObject)` takes the live object directly — confirmed by the
 same `Get-Member` listing used for `CreateReportObject` above, and by removing a `Field` object end to
 end (save, reopen, confirm it is gone from the schema).
+
+## Task 6: colour and formatting
+
+### Section-level format changes go through `SetProperty`, not `Modify`
+
+Task 4 already established `ReportSectionController` has no `Modify` method — `resizeSection` uses
+`SetProperty(section, CrReportSectionPropertyEnum, value)` instead (`Height` = 2). The brief for this
+task guessed `ReportSectionController.Modify($sec, $clone)` for `setSectionBackground`/
+`setSectionBreak`/`setSuppress`; that method still does not exist. The real shape mirrors `resizeSection`
+one enum member over: `Format` = 1. Clone `section.Format` (its own `.Clone($true)`), mutate the clone,
+then `SetProperty(section, 1, clone)`. Assigning to `section.Format` in place, or mutating the live
+`section.Format` object without cloning, does not persist — the same reason report objects go through
+Clone/Modify rather than in-place mutation.
+
+### Dot notation on `ISCRSectionFormat`/`ISCRObjectFormat`/`ISCRFieldFormat` members: routed through `Set-VibeyComProperty` defensively, not because every one was individually proven to fail
+
+The earlier, most expensive lesson in this project (Task 2's font reading) was that plain dot-notation
+get/set on a nested COM object can silently no-op with zero exception and pass a clean review — proven
+for `FontColor.Font`'s `Name`/`Size`/`Bold`. Rather than re-run that same expensive save-reopen-diff
+cycle against every individual property this task touches (`Format.BackgroundColor`,
+`Format.EnableNewPageBefore/After`, `Format.EnableSuppress(IfBlank)`, `Format.EnableCanGrow`,
+`FieldFormat.CommonFormat.EnableSystemDefault`, `FieldFormat.NumericFormat.NDecimalPlaces/
+RoundingFormat/ThousandsSeparator/EnableSuppressIfZero`), every one of them was written through
+`Get/Set-VibeyComProperty` (the `Type.InvokeMember` idiom) from the start, on the grounds that they are
+all reached through the same one-level-of-COM-object-indirection shape as the already-proven-broken
+`Font` case. This traded a bit of extra reflection call overhead for not needing to individually
+re-discover the same trap eight more times. All eight new applier arms were verified end to end (save,
+close the process, reopen, read back) via `skill/tests/Apply.Tests.ps1`, and all pass, so this was not
+a blind guess left unverified — just a case where the *general* pattern was trusted once it had already
+been proven on one member of the family, rather than re-measuring each property individually before
+writing it defensively. `FillColor`/`LineColor` are plain top-level properties on the object clone
+itself (the same level `Left`/`Top`/`Width`/`Height` already sit at, which are known to work with plain
+dot notation), so those two are left as direct assignment.
+
+### `setNumberFormat`: the `EnableSystemDefault` gate, confirmed, plus an unexpected hang when it is skipped
+
+The brief's warning proved out exactly as described: while `FieldFormat.CommonFormat.EnableSystemDefault`
+is `true` (true on every field of the fixture), `NDecimalPlaces`/`ThousandsSeparator` are silently
+discarded on save — the apply reports `ok: true` and the reopened field is unchanged.
+`EnableSuppressIfZero` was confirmed to persist even with the gate left on, which is why the test for
+this operation reads back `decimalPlaces` and `thousandsSeparator` specifically (via a new
+`decimalPlaces`/`thousandsSeparator` pair added to `Get-VibeyObjectInfo`'s schema output, both read
+through `Get-VibeyComProperty`) from a **freshly re-read, saved-and-reopened** file — not from the
+in-memory schema `Invoke-VibeyApply` itself returns after the same process's `Save-VibeyDocument` call,
+which would not distinguish "actually persisted" from "still sitting on the clone in memory."
+
+One thing not in the brief: as a sanity check that this test actually catches a regression (rather than
+passing regardless of the fix), the `EnableSystemDefault = $false` write was temporarily commented out
+and the full suite re-run. Instead of the silent no-op the brief describes, this specific combination —
+`decimalPlaces=3`, `thousandsSeparator=$true`, gate left at its default `$true` — made the `apply`
+child process (and the ones queued behind it) hang past the 60-second budget in this task's own
+guidance; it was killed via `TaskStop` rather than waited out. This was not chased further (the fix is
+to clear the gate regardless, which the shipped code does unconditionally), but it's recorded here
+because "EnableSystemDefault left on" is evidently not always a clean no-op — it can also leave RAS in
+a state where `SaveAs` does not return, depending on which explicit values are set underneath it. Worth
+knowing before anyone is tempted to make the gate write conditional.
+
+### Colour byte order: `ConvertTo-VibeyColorRef`
+
+Confirmed against the C# reference (`ColorRef.FromHex` in `LayoutApplier.cs`) rather than re-measured
+independently: Crystal's COLORREF is `0x00BBGGRR`, byte-order-reversed from HTML's `#RRGGBB`. All three
+of the brief's test cases (`#FF0000` → 255, `#0000FF` → 16711680, `#000000` → 0) pass unchanged.

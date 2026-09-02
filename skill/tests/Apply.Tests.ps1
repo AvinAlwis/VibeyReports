@@ -178,6 +178,51 @@ It 'removes an object and reports what it removed' {
     if ($still) { throw "object $($t.name) is still present after removeObject" }
 }
 
+It 'converts HTML hex to COLORREF with the byte order reversed' {
+    Import-Module (Join-Path $PSScriptRoot '..\vibey-reports\scripts\VibeyCrystal.psm1') -Force
+    Should-Be (ConvertTo-VibeyColorRef -Hex '#FF0000') 255      'red'
+    Should-Be (ConvertTo-VibeyColorRef -Hex '#0000FF') 16711680 'blue'
+    Should-Be (ConvertTo-VibeyColorRef -Hex '#000000') 0        'black'
+}
+
+It 'sets a fill colour on a box and it survives a reopen' {
+    $a = Apply-Ops @(
+        @{ action='resizeSection'; section='DetailSection1'; heightTwips=1000 },
+        @{ action='addBox'; section='DetailSection1'; newName='VibeyBox'
+           leftTwips=0; topTwips=0; widthTwips=4000; heightTwips=400 },
+        @{ action='setFillColor'; target='VibeyBox'; color='#DCE3EA' }) 'fill.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+}
+
+It 'sets a page break on a section and it reads back' {
+    $a = Apply-Ops @{ action='setSectionBreak'; section='DetailSection1'; newPageAfter=$true } 'break.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+}
+
+It 'sets a number format that persists - the EnableSystemDefault gate' {
+    $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
+    $field = $null
+    foreach ($s in $before.sections) { foreach ($o in $s.objects) { if ($o.kind -eq 'Field') { $field = $o; break } } }
+    if (-not $field) { throw 'fixture has no Field object' }
+    $a = Apply-Ops @{ action='setNumberFormat'; target=$field.name; decimalPlaces=3; thousandsSeparator=$true } 'number.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+    # MEASURED: setNumberFormat silently no-ops unless CommonFormat.EnableSystemDefault is
+    # cleared first, and a test that reads the applied value back only from the in-memory
+    # $a.Result.schema (the object Invoke-VibeyApply itself just wrote) would not catch that --
+    # it needs a fresh read of the SAVED file, in a fresh process, to prove the format actually
+    # persisted rather than just existing on the clone in memory. So this re-reads $a.Output
+    # through a brand new Invoke-Vibey call rather than trusting $a.Result.schema.
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq $field.name }
+    Should-Be $o.decimalPlaces 3 'decimalPlaces'
+    Should-Be $o.thousandsSeparator $true 'thousandsSeparator'
+}
+
+It 'suppresses a section' {
+    $a = Apply-Ops @{ action='setSuppress'; section='PageFooterSection1'; suppress=$true } 'suppress.rpt'
+    Should-Be $a.Result.ok $true 'ok'
+}
+
 It 'cleans up the temp file when the destination move fails' {
     $before = (Invoke-Vibey @{ command='read'; reportPath=$fixture }).schema
     $t = First-FontableObject $before
