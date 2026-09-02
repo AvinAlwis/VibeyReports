@@ -28,6 +28,21 @@ $script:Alignments    = @('Left','Right','Centre','Center','Justified')
 $script:SpecialTypes  = @('pageNumber','pageNOfM','totalPageCount','printDate','printTime','reportTitle','recordNumber')
 $script:AddActions    = @('addText','addLine','addBox','addField','addSpecialField')
 
+# Coerces a plan-supplied value (leftTwips, heightTwips, fontSizePt, ...) to a number without
+# ever throwing. A model can plausibly emit a string where a number belongs (e.g. "tall"), and
+# the validator's contract is to report that as IsValid = $false, not to crash on a cast.
+# Returns @{ Ok = <bool>; Value = <double> } - Value is meaningless when Ok is $false.
+function Get-VibeyNumber($Value) {
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+        return @{ Ok = $true; Value = [double]$Value }
+    }
+    if ($null -ne $Value) {
+        $parsed = 0.0
+        if ([double]::TryParse([string]$Value, [ref]$parsed)) { return @{ Ok = $true; Value = $parsed } }
+    }
+    return @{ Ok = $false; Value = 0 }
+}
+
 function Test-VibeyPlan {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)]$Schema)
@@ -100,7 +115,9 @@ function Test-VibeyPlan {
         }
 
         if ($action -eq 'resizeSection') {
-            $h = [int]$op.heightTwips
+            $hn = Get-VibeyNumber $op.heightTwips
+            if (-not $hn.Ok) { Add-Err $i "`"heightTwips`" must be a number, got `"$($op.heightTwips)`"."; continue }
+            $h = [int]$hn.Value
             if ($h -lt 0) { Add-Err $i 'Section height cannot be negative.' }
             elseif ($h -gt $printableHeight) {
                 Add-Err $i "Section height $h exceeds the printable height of $printableHeight."
@@ -109,21 +126,42 @@ function Test-VibeyPlan {
             }
         }
         elseif ($action -eq 'move') {
-            $l = [int]$op.leftTwips; $t = [int]$op.topTwips
+            $ln = Get-VibeyNumber $op.leftTwips
+            if (-not $ln.Ok) { Add-Err $i "`"leftTwips`" must be a number, got `"$($op.leftTwips)`"."; continue }
+            $tn = Get-VibeyNumber $op.topTwips
+            if (-not $tn.Ok) { Add-Err $i "`"topTwips`" must be a number, got `"$($op.topTwips)`"."; continue }
+            $l = [int]$ln.Value; $t = [int]$tn.Value
             $secH = $sectionHeights[$target.Section]
+
             # "Do not make it worse": an object already overflowing may be moved, as long as
             # the move does not increase the overflow. Otherwise a report that arrives broken
-            # can never be repaired.
-            $wasBad = ($target.Left + $target.Width -gt $printableWidth) -or ($target.Top + $target.Height -gt $secH)
-            $isBad  = ($l + $target.Width -gt $printableWidth) -or ($t + $target.Height -gt $secH)
-            if ($isBad -and -not $wasBad) {
-                Add-Err $i "`"$($op.target)`" would end at $($l + $target.Width) x $($t + $target.Height), outside the printable width $printableWidth or section height $secH."
-            } else {
-                $target.Left = $l; $target.Top = $t
+            # can never be repaired. Each axis is checked INDEPENDENTLY - coupling them into a
+            # single boolean (as an earlier version of this file did) grants amnesty on a fine
+            # axis just because the other axis was already broken: an object too tall for its
+            # section could then be moved to also blow past the printable width and pass,
+            # solely because the height problem pre-existed.
+            $oldRight  = $target.Left + $target.Width
+            $oldBottom = $target.Top + $target.Height
+            $newRight  = $l + $target.Width
+            $newBottom = $t + $target.Height
+
+            $moveOk = $true
+            if ($newRight -gt $printableWidth -and $newRight -gt $oldRight) {
+                Add-Err $i "Moving `"$($op.target)`" to leftTwips $l puts its right edge at $newRight, past the printable width of $printableWidth."
+                $moveOk = $false
             }
+            if ($newBottom -gt $secH -and $newBottom -gt $oldBottom) {
+                Add-Err $i "Moving `"$($op.target)`" to topTwips $t puts its bottom edge at $newBottom, past the height of section `"$($target.Section)`" ($secH)."
+                $moveOk = $false
+            }
+            if ($moveOk) { $target.Left = $l; $target.Top = $t }
         }
         elseif ($action -eq 'resize') {
-            $w = [int]$op.widthTwips; $h = [int]$op.heightTwips
+            $wn = Get-VibeyNumber $op.widthTwips
+            if (-not $wn.Ok) { Add-Err $i "`"widthTwips`" must be a number, got `"$($op.widthTwips)`"."; continue }
+            $hn = Get-VibeyNumber $op.heightTwips
+            if (-not $hn.Ok) { Add-Err $i "`"heightTwips`" must be a number, got `"$($op.heightTwips)`"."; continue }
+            $w = [int]$wn.Value; $h = [int]$hn.Value
             if ($w -lt 0 -or $h -lt 0) { Add-Err $i 'Width and height cannot be negative.' }
             elseif ($target.Kind -eq 'Line' -and $w -ne 0 -and $h -ne 0) {
                 Add-Err $i "A line must be horizontal or vertical: set widthTwips or heightTwips to 0 (got $w x $h)."
@@ -158,8 +196,12 @@ function Test-VibeyPlan {
             if ($script:FontableKinds -notcontains $target.Kind) {
                 Add-Err $i "`"$($op.target)`" is a $($target.Kind) and has no font."
             } else {
-                $pt = [double]$op.fontSizePt
-                if ($pt -lt 4 -or $pt -gt 72) { Add-Err $i "Font size $pt is outside 4-72 points." }
+                $ptn = Get-VibeyNumber $op.fontSizePt
+                if (-not $ptn.Ok) { Add-Err $i "`"fontSizePt`" must be a number, got `"$($op.fontSizePt)`"." }
+                else {
+                    $pt = $ptn.Value
+                    if ($pt -lt 4 -or $pt -gt 72) { Add-Err $i "Font size $pt is outside 4-72 points." }
+                }
             }
         }
         elseif ($action -eq 'setBold') {
@@ -213,8 +255,10 @@ function Test-VibeyPlan {
             elseif ($null -eq $op.decimalPlaces -and $null -eq $op.thousandsSeparator -and $null -eq $op.suppressIfZero) {
                 Add-Err $i '"setNumberFormat" needs at least one of "decimalPlaces", "thousandsSeparator" or "suppressIfZero".'
             }
-            elseif ($null -ne $op.decimalPlaces -and ([int]$op.decimalPlaces -lt 0 -or [int]$op.decimalPlaces -gt 10)) {
-                Add-Err $i "decimalPlaces must be 0-10, was $($op.decimalPlaces)."
+            elseif ($null -ne $op.decimalPlaces) {
+                $dn = Get-VibeyNumber $op.decimalPlaces
+                if (-not $dn.Ok) { Add-Err $i "`"decimalPlaces`" must be a number, got `"$($op.decimalPlaces)`"." }
+                elseif ($dn.Value -lt 0 -or $dn.Value -gt 10) { Add-Err $i "decimalPlaces must be 0-10, was $($op.decimalPlaces)." }
             }
         }
         elseif ($action -eq 'setSectionBreak') {
@@ -235,8 +279,16 @@ function Test-VibeyPlan {
             elseif ($objects.ContainsKey($op.newName)) {
                 Add-Err $i "An object named `"$($op.newName)`" already exists."
             } else {
-                $l = [int]$op.leftTwips; $t = [int]$op.topTwips
-                $w = [int]$op.widthTwips; $h = [int]$op.heightTwips
+                $ln = Get-VibeyNumber $op.leftTwips
+                $tn = Get-VibeyNumber $op.topTwips
+                $wn = Get-VibeyNumber $op.widthTwips
+                $hn = Get-VibeyNumber $op.heightTwips
+                if (-not $ln.Ok -or -not $tn.Ok -or -not $wn.Ok -or -not $hn.Ok) {
+                    Add-Err $i "`"$action`" requires numeric leftTwips, topTwips, widthTwips and heightTwips."
+                    continue
+                }
+                $l = [int]$ln.Value; $t = [int]$tn.Value
+                $w = [int]$wn.Value; $h = [int]$hn.Value
                 if ($l -lt 0 -or $t -lt 0 -or $w -lt 0 -or $h -lt 0) { Add-Err $i 'Geometry cannot be negative.' }
                 elseif ($action -eq 'addLine' -and $w -ne 0 -and $h -ne 0) {
                     Add-Err $i 'A line must be horizontal or vertical: set widthTwips or heightTwips to 0.'
