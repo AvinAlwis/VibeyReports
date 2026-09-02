@@ -29,7 +29,10 @@ function Should-Throw([scriptblock]$Body, [string]$Needle) {
     if (-not $threw) { throw 'expected an exception, none thrown' }
 }
 
-foreach ($f in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Tests.ps1' | Where-Object { $_.Name -like $Filter }) {
+$files = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Tests.ps1' | Where-Object { $_.Name -like $Filter })
+if ($files.Count -eq 0) { Write-Host "No test files matched filter '$Filter'" -ForegroundColor Red; exit 2 }
+
+foreach ($f in $files) {
     Write-Host "`n$($f.Name)" -ForegroundColor Cyan
     . $f.FullName
 }

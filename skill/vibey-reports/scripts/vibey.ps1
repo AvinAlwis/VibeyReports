@@ -28,9 +28,14 @@ if ([Environment]::Is64BitProcess) {
     }
     $tmp = [IO.Path]::GetTempFileName()
     try {
-        [IO.File]::WriteAllText($tmp, $raw, $utf8NoBom)
-        & $x86 -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -RequestFile $tmp
-        exit $LASTEXITCODE
+        try {
+            [IO.File]::WriteAllText($tmp, $raw, $utf8NoBom)
+            & $x86 -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -RequestFile $tmp
+            exit $LASTEXITCODE
+        } catch {
+            Write-VibeyResponse @{ ok = $false; error = "Relaunch under 32-bit PowerShell failed: $($_.Exception.Message)" }
+            exit 1
+        }
     } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
 }
 
@@ -42,8 +47,8 @@ try {
     Import-Module (Join-Path $PSScriptRoot 'VibeyCrystal.psm1')  -Force
 
     switch ($request.command) {
-        'read'  { Write-VibeyResponse (Invoke-VibeyRead  -Request $request) }
-        'apply' { Write-VibeyResponse (Invoke-VibeyApply -Request $request) }
+        'read'  { $resp = Invoke-VibeyRead  -Request $request; Write-VibeyResponse $resp; if (-not $resp.ok) { exit 1 } }
+        'apply' { $resp = Invoke-VibeyApply -Request $request; Write-VibeyResponse $resp; if (-not $resp.ok) { exit 1 } }
         default {
             Write-VibeyResponse @{ ok = $false
                 error = "`"$($request.command)`" is not a supported command. Supported: read, apply." }
