@@ -1199,3 +1199,68 @@ knowing before anyone is tempted to make the gate write conditional.
 Confirmed against the C# reference (`ColorRef.FromHex` in `LayoutApplier.cs`) rather than re-measured
 independently: Crystal's COLORREF is `0x00BBGGRR`, byte-order-reversed from HTML's `#RRGGBB`. All three
 of the brief's test cases (`#FF0000` → 255, `#0000FF` → 16711680, `#000000` → 0) pass unchanged.
+
+## Two ways to break Crystal while un-linking a sub-report (measured 2026-09-03)
+
+Both found while rebuilding Report 2 for Report Navigator's SP mode, which pushes DataTables with
+`SetDataSource` instead of letting Crystal run the query. In that model a sub-report **field link**
+is fatal: the link compiles into hidden `Pm-<main field>` parameter fields inside the sub-report,
+Crystal fills them only during its own linkage pass, and that pass never runs. Measured on the
+linked build of `PMSV10_GoalAlignCascade.rpt`:
+
+```
+Pm-sp_perf_goal_align_cascade;1.performance_cycle_id   report='GoalDetail'  hasValue=False
+Pm-sp_perf_goal_align_cascade;1.emp_number             report='GoalDetail'  hasValue=False
+```
+
+`ExportToStream` then throws `Missing parameter values.` — and there is no way to supply them, since
+`ReportDocument.SetParameterValue` refuses the `Pm-` names (`Cannot find parameter field
+Pm-sp_perf_goal_align_cascade;1.performance_cycle_id in subreport GoalDetail`).
+
+### 1. `SetSubreportLinks` with an empty link collection hangs, and never returns
+
+The obvious way to remove links is to hand the controller an empty collection:
+
+```powershell
+$empty = New-Object CrystalDecisions.ReportAppServer.ReportDefModel.SubreportLinksClass
+$doc.SubreportController.SetSubreportLinks($n, $empty)      # NEVER DO THIS
+```
+
+**Measured:** the process spins at ~85% CPU and does not come back. Sampled twice, twenty seconds
+apart: 402 → 419 CPU-seconds, still climbing, no exception, no completion, nothing written. Killed
+manually. This is a genuine infinite loop inside Crystal, **not** the VPN-down block described
+elsewhere in this file — the tell is exactly the one that note gives: sample `.CPU` twice and compare.
+A blocked report sits at 0%; this sits at 85%.
+
+Because of this there is no `removeSubreportLink` / `clearSubreportLinks` operation, and there should
+not be one until someone finds a route that terminates.
+
+**What works instead:** drop the placed sub-report and re-import it, which is two operations the
+applier already has:
+
+```
+removeObject  Subreport1
+addSubreport  GoalDetail  (no setSubreportLink afterwards)
+```
+
+The re-imported sub-report keeps its own procedure's parameters but loses the `Pm-` pair with the
+links. Note the re-import replaces the embedded copy wholesale, so any change made by hand in the
+Designer to the embedded sub-report is lost — regenerate the standalone `.rpt` first.
+
+### 2. A layout plan applied to a report whose table was just cascade-removed corrupts the heap
+
+`removeTable` cascade-deletes the fields bound to the table (documented above). Running a normal
+layout plan against the result, in a **separate** `apply` on the saved file, is fine. Running the
+layout plan against a report where the cascade happened earlier **in the same session's base file**
+is not:
+
+```
+exit code -1073740940  ==  0xC0000374  ==  STATUS_HEAP_CORRUPTION
+```
+
+The worker dies outright — no JSON response, no stderr, nothing for the client to report. (This is
+what prompted `gen-goal-align-variants.ps1` to treat an empty stdout as its own error case; before
+that the failure surfaced as a bare label with no message.)
+
+**Order that holds:** layout first, `removeTable` second, as two separate applies against two
+separate files. `gen-goal-align-variants.ps1` is built that way deliberately and says so.
