@@ -186,17 +186,26 @@ It 'converts HTML hex to COLORREF with the byte order reversed' {
 }
 
 It 'sets a fill colour on a box and it survives a reopen' {
+    # #FF0000 rather than a muted tone: a red/blue byte-order swap on a near-grey colour like
+    # #DCE3EA would land close to the original value and could pass by accident. Pure red makes
+    # a swap land on pure blue instead -- unmissable.
     $a = Apply-Ops @(
         @{ action='resizeSection'; section='DetailSection1'; heightTwips=1000 },
         @{ action='addBox'; section='DetailSection1'; newName='VibeyBox'
            leftTwips=0; topTwips=0; widthTwips=4000; heightTwips=400 },
-        @{ action='setFillColor'; target='VibeyBox'; color='#DCE3EA' }) 'fill.rpt'
+        @{ action='setFillColor'; target='VibeyBox'; color='#FF0000' }) 'fill.rpt'
     Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $o = $after.sections | ForEach-Object { $_.objects } | Where-Object { $_.name -eq 'VibeyBox' }
+    Should-Be $o.fillColorHex '#FF0000' 'fillColorHex'
 }
 
 It 'sets a page break on a section and it reads back' {
     $a = Apply-Ops @{ action='setSectionBreak'; section='DetailSection1'; newPageAfter=$true } 'break.rpt'
     Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $s = $after.sections | Where-Object { $_.name -eq 'DetailSection1' }
+    Should-Be $s.newPageAfter $true 'newPageAfter'
 }
 
 It 'sets a number format that persists - the EnableSystemDefault gate' {
@@ -221,6 +230,9 @@ It 'sets a number format that persists - the EnableSystemDefault gate' {
 It 'suppresses a section' {
     $a = Apply-Ops @{ action='setSuppress'; section='PageFooterSection1'; suppress=$true } 'suppress.rpt'
     Should-Be $a.Result.ok $true 'ok'
+    $after = (Invoke-Vibey @{ command='read'; reportPath=$a.Output }).schema
+    $s = $after.sections | Where-Object { $_.name -eq 'PageFooterSection1' }
+    Should-Be $s.suppressed $true 'suppressed'
 }
 
 It 'cleans up the temp file when the destination move fails' {

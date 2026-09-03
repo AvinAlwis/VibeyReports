@@ -106,6 +106,7 @@ function Get-VibeyObjectInfo {
         text = $null; dataSource = $null
         fontName = $null; fontSizePt = $null; bold = $null
         decimalPlaces = $null; thousandsSeparator = $null
+        textColorHex = $null; fillColorHex = $null; lineColorHex = $null
     }
     # Fonts are reached through FontColor.Font, and read via Get-VibeyComProperty (see its
     # comment) rather than dot notation. On SampleReport.rpt's own objects, none carry an
@@ -122,7 +123,17 @@ function Get-VibeyObjectInfo {
         if ($null -ne $fontName) { $info.fontName   = $fontName }
         if ($null -ne $fontSize) { $info.fontSizePt = [double]$fontSize }
         if ($null -ne $fontBold) { $info.bold       = [bool]$fontBold }
+        # FontColor.Color is one level of nested-COM indirection, the same shape as
+        # FontColor.Font's Name/Size/Bold, so it is read through Get-VibeyComProperty rather
+        # than trusted to dot notation, for the same reason those three are.
+        $colorVal = Get-VibeyComProperty -ComObject $fc -Name 'Color'
+        if ($null -ne $colorVal) { $info.textColorHex = ConvertFrom-VibeyColorRef -ColorRef $colorVal }
     }
+    # FillColor/LineColor are plain top-level properties on the object itself (the same level
+    # Left/Top/Width/Height sit at), not nested through another COM object, so plain dot
+    # notation is used -- only Box/Line objects carry them, hence the try/catch.
+    try { if ($null -ne $o.FillColor) { $info.fillColorHex = ConvertFrom-VibeyColorRef -ColorRef $o.FillColor } } catch { }
+    try { if ($null -ne $o.LineColor) { $info.lineColorHex = ConvertFrom-VibeyColorRef -ColorRef $o.LineColor } } catch { }
     try { if ($o.Text)       { $info.text       = $o.Text } }       catch { }
     try { if ($o.DataSource) { $info.dataSource = $o.DataSource } } catch { }
     # Number format is reached through FieldFormat.NumericFormat -- nested COM objects the same
@@ -168,9 +179,31 @@ function Get-VibeySchema {
         foreach ($entry in (Get-VibeySectionList -Doc $doc)) {
             $objects = @()
             foreach ($ro in $entry.Section.ReportObjects) { $objects += (Get-VibeyObjectInfo -ReportObject $ro) }
+            # Every property setSectionBreak and setSuppress's section form, plus
+            # setSectionBackground, can write. ISCRSectionFormat is a nested COM object one level
+            # in from the section (same shape as FontColor.Font), so every read here goes through
+            # Get-VibeyComProperty rather than dot notation. A write-only property leaves the
+            # caller with no way to prove a change persisted -- see the Task 6 fix report.
+            $suppressed = $null; $newPageBefore = $null; $newPageAfter = $null
+            $suppressIfBlank = $null; $backgroundColorHex = $null
+            if ($entry.Section.Format) {
+                $fmt = $entry.Section.Format
+                $sv = Get-VibeyComProperty -ComObject $fmt -Name 'EnableSuppress'
+                $nb = Get-VibeyComProperty -ComObject $fmt -Name 'EnableNewPageBefore'
+                $na = Get-VibeyComProperty -ComObject $fmt -Name 'EnableNewPageAfter'
+                $sb = Get-VibeyComProperty -ComObject $fmt -Name 'EnableSuppressIfBlank'
+                $bg = Get-VibeyComProperty -ComObject $fmt -Name 'BackgroundColor'
+                if ($null -ne $sv) { $suppressed        = [bool]$sv }
+                if ($null -ne $nb) { $newPageBefore      = [bool]$nb }
+                if ($null -ne $na) { $newPageAfter       = [bool]$na }
+                if ($null -ne $sb) { $suppressIfBlank    = [bool]$sb }
+                if ($null -ne $bg) { $backgroundColorHex = ConvertFrom-VibeyColorRef -ColorRef $bg }
+            }
             $sections += [ordered]@{
                 name = $entry.Name; kind = $entry.Kind
                 heightTwips = [int]$entry.Section.Height; objects = $objects
+                suppressed = $suppressed; newPageBefore = $newPageBefore; newPageAfter = $newPageAfter
+                suppressIfBlank = $suppressIfBlank; backgroundColorHex = $backgroundColorHex
             }
         }
         return [ordered]@{
@@ -264,6 +297,32 @@ function ConvertTo-VibeyColorRef {
     $g = [Convert]::ToInt32($h.Substring(2,2),16)
     $b = [Convert]::ToInt32($h.Substring(4,2),16)
     return (($b -shl 16) -bor ($g -shl 8) -bor $r)
+}
+
+function ConvertFrom-VibeyColorRef {
+    <#
+        The reverse of ConvertTo-VibeyColorRef, for reading colours back out of a report:
+        Crystal's UInt32 COLORREF (0x00BBGGRR) -> "#RRGGBB".
+
+        MEASURED sentinel (per the C# reference, src\VibeyReports.Contracts\ColorRef.cs, whose
+        header documents how it was established): 0xFFFFFFFF is Crystal's "no colour set" value
+        on FillColor and section BackgroundColor when nothing was ever explicitly set, and is
+        mapped to $null here rather than the nonsensical "#FFFFFF", which would collide with a
+        real, explicitly set white. LineColor/FontColor.Color were not observed to carry this
+        sentinel (they default to black/0), but the mapping is applied uniformly to all colour
+        properties since Crystal exposes no separate "is this colour set" flag on any of them.
+
+        COM hands this back as a signed Int32 (0xFFFFFFFF reads as -1), so it is normalised to
+        an unsigned 32-bit value via a bitmask before the sentinel comparison and channel
+        extraction, rather than compared/shifted as a signed number.
+    #>
+    param([Parameter(Mandatory)]$ColorRef)
+    $u = [uint32]([int64]$ColorRef -band 0xFFFFFFFFL)
+    if ($u -eq 0xFFFFFFFF) { return $null }
+    $r = $u -band 0xFF
+    $g = ($u -shr 8) -band 0xFF
+    $b = ($u -shr 16) -band 0xFF
+    return ('#{0:X2}{1:X2}{2:X2}' -f $r, $g, $b)
 }
 
 function New-VibeyDefaultFontColor {
@@ -638,4 +697,4 @@ function Invoke-VibeyApply {
               schema = (Get-VibeySchema -Path $Request.outputPath) }
 }
 
-Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply, Save-VibeyDocument, Find-VibeyObject, Find-VibeySection, Set-VibeyObject, Get-VibeyComProperty, Set-VibeyComProperty, ConvertTo-VibeyColorRef, New-VibeyDefaultFontColor
+Export-ModuleMember -Function Open-VibeyDocument, Get-VibeySectionList, Get-VibeySchema, Get-VibeyObjectInfo, Invoke-VibeyRead, Invoke-VibeyApply, Save-VibeyDocument, Find-VibeyObject, Find-VibeySection, Set-VibeyObject, Get-VibeyComProperty, Set-VibeyComProperty, ConvertTo-VibeyColorRef, ConvertFrom-VibeyColorRef, New-VibeyDefaultFontColor

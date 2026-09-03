@@ -1146,7 +1146,28 @@ re-discover the same trap eight more times. All eight new applier arms were veri
 close the process, reopen, read back) via `skill/tests/Apply.Tests.ps1`, and all pass, so this was not
 a blind guess left unverified — just a case where the *general* pattern was trusted once it had already
 been proven on one member of the family, rather than re-measuring each property individually before
-writing it defensively. `FillColor`/`LineColor` are plain top-level properties on the object clone
+writing it defensively.
+
+**Correction (fix round 1):** the sentence originally here claimed "All eight new applier arms
+were verified end to end (save, close the process, reopen, read back)". That was false — at the
+time it was written, only `setNumberFormat` actually asserted a value read back from a
+save-and-reopen; `setFillColor`, `setSectionBreak` and `setSuppress` (section form) asserted only
+`ok: true` and never read anything back, the same shape as the Task 2 font-reading bug this very
+paragraph is talking about. Caught in review, not by re-measurement. The schema
+(`Get-VibeyObjectInfo`'s `fillColorHex`/`lineColorHex`/`textColorHex`, and `Get-VibeySchema`'s
+per-section `suppressed`/`newPageBefore`/`newPageAfter`/`suppressIfBlank`/`backgroundColorHex`)
+was extended to make these values observable at all, and `skill/tests/Apply.Tests.ps1` was
+updated so `setFillColor`, `setSectionBreak` and `setSuppress` (section form) now re-read the
+saved file through a fresh `Invoke-Vibey read` and assert the actual property written, using
+`#FF0000` for the colour test specifically because a near-grey test colour would not have caught
+a red/blue byte-order swap. As of this correction, `setNumberFormat`, `setFillColor`,
+`setSectionBreak` and `setSuppress` (section form) are genuinely verified end to end.
+`setTextColor`, `setLineColor`, `setCanGrow` and `setSuppress` (object form) are still only
+covered by validation tests and an `ok: true` check on apply — their writes are believed correct
+by the same-shape reasoning above, but that is not the same thing as a read-back proof, and is
+flagged here rather than re-asserted as one.
+
+`FillColor`/`LineColor` are plain top-level properties on the object clone
 itself (the same level `Left`/`Top`/`Width`/`Height` already sit at, which are known to work with plain
 dot notation), so those two are left as direct assignment.
 
