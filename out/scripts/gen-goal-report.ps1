@@ -208,11 +208,11 @@ foreach ($c in $col) { Op $c }
 $plan = @{
   command    = 'apply'
   reportPath = 'D:/VibeyReports/tests/fixtures/SampleReport.rpt'
-  outputPath = 'D:/VibeyReports/out/reports/GoalAlignmentReport.rpt'
+  outputPath = 'D:/VibeyReports/out/archive/reports/GoalAlignmentReport.rpt'
   overwrite  = $true
   plan       = @{ planVersion = 1; operations = $ops }
 }
-[IO.File]::WriteAllText('D:\VibeyReports\out\json\goal-plan.json', ($plan | ConvertTo-Json -Depth 10 -Compress))
+[IO.File]::WriteAllText('D:\VibeyReports\out\archive\json\goal-plan.json', ($plan | ConvertTo-Json -Depth 10 -Compress))
 
 $bottom = $ft + 960
 Write-Output "operations : $($ops.Count)  (colour: $($col.Count))"

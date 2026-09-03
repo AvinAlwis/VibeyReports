@@ -1,7 +1,7 @@
 # Lays out the Individual Detailed Evaluation Report main report and embeds its
 # seven sub-reports.
 #
-# Input:  out/reports/_shell_overview.rpt  (blank, bound to sp_perf_detailed_eval_overview)
+# Input:  out/archive/inputs/_shell_overview.rpt  (blank, bound to sp_perf_detailed_eval_overview)
 # Output: out/reports/PMSV10_IndDetailedEval.rpt
 #
 # WHY TWO SECTIONS, AND WHY PAGE 1 IS A GROUP HEADER
@@ -199,7 +199,7 @@ $y = $y + 1000
 # ---- Stage-Wise Evaluation Summary (sub-report) -------------------------------
 $y = Band 'STAGE-WISE EVALUATION SUMMARY' ($y + 200)
 Op @{ action='addSubreport'; section=$SEC; newName='StageWise';
-      reportPath='D:/VibeyReports/out/reports/PMSV10_IndDetEval_Stages.rpt'
+      reportPath='D:/VibeyReports/out/archive/reports/PMSV10_IndDetEval_Stages.rpt'
       leftTwips=0; topTwips=$y; widthTwips=$W; heightTwips=2400 }
 Op @{ action='setSubreportLink'; target='StageWise'
       mainReportField=("{" + $SRC + ".performance_cycle_id}")
@@ -220,7 +220,7 @@ $y = $y + 2400
 # printable boundary and the left edge is clipped. 150 matches the left inset used
 # by the text inside every panel below.
 Op @{ action='addSubreport'; section=$SEC; newName='CompanyLogo';
-      reportPath='D:/VibeyReports/out/reports/PMSV10_IndDetEval_Logo.rpt'
+      reportPath='D:/VibeyReports/out/archive/reports/PMSV10_IndDetEval_Logo.rpt'
       leftTwips=150; topTwips=100; widthTwips=1600; heightTwips=700 }
 
 $p1h = $y + 150
@@ -249,7 +249,7 @@ for ($i = 0; $i -lt $subs.Count; $i++) {
   $SEC = $P2LIST[$i]      # each table owns its section; y restarts at 0 in each
   $y = Band $s.cap 0
   Op @{ action='addSubreport'; section=$SEC; newName=$s.n;
-        reportPath=("D:/VibeyReports/out/reports/" + $s.file)
+        reportPath=("D:/VibeyReports/out/archive/reports/" + $s.file)
         leftTwips=0; topTwips=$y; widthTwips=$W; heightTwips=$s.h }
   Op @{ action='setSubreportLink'; target=$s.n
         mainReportField=("{" + $SRC + ".performance_cycle_id}")
@@ -294,12 +294,12 @@ foreach ($sec in $P2LIST) { Op @{ action='resizeSection'; section=$sec; heightTw
 
 $plan = @{
   command    = 'apply'
-  reportPath = 'D:/VibeyReports/out/reports/_shell_overview.rpt'
+  reportPath = 'D:/VibeyReports/out/archive/inputs/_shell_overview.rpt'
   outputPath = 'D:/VibeyReports/out/reports/PMSV10_IndDetailedEval.rpt'
   overwrite  = $true
   plan       = @{ planVersion = 1; operations = $ops }
 }
-[IO.File]::WriteAllText('D:\VibeyReports\out\json\eval-main.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
+[IO.File]::WriteAllText('D:\VibeyReports\out\archive\json\eval-main.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
 
 Write-Output ("operations : {0}  (colour {1})" -f $ops.Count, $col.Count)
 Write-Output ("page 1     : {0} twips  (limit 16118)" -f $p1h)

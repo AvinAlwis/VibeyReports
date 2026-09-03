@@ -31,19 +31,19 @@ foreach ($s in $read.schema.sections) {
 }
 if ($ops.Count -eq 0) { throw 'no sub-reports found - run gen-eval-main.ps1 first' }
 
-$tmp = 'D:/VibeyReports/out/reports/_grow_tmp.rpt'
+$tmp = 'D:/VibeyReports/out/archive/_grow_tmp.rpt'
 $plan = [pscustomobject]@{
     command = 'apply'; reportPath = $report; outputPath = $tmp; overwrite = $true
     plan = [pscustomobject]@{ planVersion = 1; operations = $ops }
 }
-[IO.File]::WriteAllText('D:\VibeyReports\out\json\eval-grow.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
+[IO.File]::WriteAllText('D:\VibeyReports\out\archive\json\eval-grow.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
 
-$res = (Get-Content 'D:\VibeyReports\out\json\eval-grow.json' -Raw) | & $worker | ConvertFrom-Json
+$res = (Get-Content 'D:\VibeyReports\out\archive\json\eval-grow.json' -Raw) | & $worker | ConvertFrom-Json
 if (-not $res.ok) {
     $res.validationErrors | ForEach-Object { Write-Output ("  ! " + $_.message) }
     throw "apply failed: $($res.error)"
 }
 
-Move-Item -Force -LiteralPath 'D:\VibeyReports\out\reports\_grow_tmp.rpt' `
+Move-Item -Force -LiteralPath 'D:\VibeyReports\out\archive\_grow_tmp.rpt' `
                  -Destination 'D:\VibeyReports\out\reports\PMSV10_IndDetailedEval.rpt'
 Write-Output ("can-grow set on {0} sub-reports" -f $ops.Count)

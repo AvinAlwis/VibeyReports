@@ -1,7 +1,7 @@
 # Rebuilds the Goal Alignment & Cascading Report against LIVE data.
 #
-# Input:  out/reports/GoalAlignmentReport.v2.rpt  (already has both SPs wired up)
-# Output: out/reports/GoalAlignmentReport.live.rpt
+# Input:  out/archive/reports/GoalAlignmentReport.v2.rpt  (already has both SPs wired up)
+# Output: out/archive/reports/GoalAlignmentReport.live.rpt
 #
 # Restructures from "everything static in the Report Header" into the proper Crystal shape:
 #   ReportHeader  - header block, employee/cycle details (bound), overview tiles (bound), table banner
@@ -12,7 +12,7 @@
 # Font inheritance is PER SECTION, so each section gets its own anchor object set to Segoe UI;
 # everything added to that section afterwards inherits it.
 
-$schema = (Get-Content 'D:\VibeyReports\out\json\schema-live.json' -Raw | ConvertFrom-Json).schema
+$schema = (Get-Content 'D:\VibeyReports\out\archive\json\schema-live.json' -Raw | ConvertFrom-Json).schema
 
 $ops = New-Object System.Collections.ArrayList
 $col = New-Object System.Collections.ArrayList
@@ -194,12 +194,12 @@ foreach ($c in $col) { Op $c }
 
 $plan = @{
   command    = 'apply'
-  reportPath = 'D:/VibeyReports/out/reports/GoalAlignmentReport.v2.rpt'
-  outputPath = 'D:/VibeyReports/out/reports/GoalAlignmentReport.live.rpt'
+  reportPath = 'D:/VibeyReports/out/archive/reports/GoalAlignmentReport.v2.rpt'
+  outputPath = 'D:/VibeyReports/out/archive/reports/GoalAlignmentReport.live.rpt'
   overwrite  = $true
   plan       = @{ planVersion = 1; operations = $ops }
 }
-[IO.File]::WriteAllText('D:\VibeyReports\out\json\goal-plan-live.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
+[IO.File]::WriteAllText('D:\VibeyReports\out\archive\json\goal-plan-live.json', ($plan | ConvertTo-Json -Depth 12 -Compress))
 
 $bound = ($ops | Where-Object { $_.action -eq 'addField' }).Count
 Write-Output "cleared static objects : $cleared"

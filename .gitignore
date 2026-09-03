@@ -23,7 +23,12 @@ TestResults/
 # out/scripts/ on demand, and previewing one makes Crystal save live employee
 # rows into the .rpt - which must not reach a git remote.
 #
-# The hand-made INPUTS are tracked, because nothing can rebuild them:
+# out/reports/ holds only the FINAL deliverable .rpt files. Everything else a run
+# produces - superseded revisions, sub-report sources, exported PDFs, the request and
+# response JSON - is moved under out/archive/, which is entirely local.
+#
+# The hand-made INPUTS are tracked, because nothing can rebuild them. They live in
+# out/archive/inputs/ so they do not clutter out/reports/:
 #   _shell_*.rpt              blank shells; _shell_overview.rpt carries the
 #                             extra Details sections added in the Designer
 #   Report1.rpt               the hand-made blank every shell was rebound from
@@ -33,6 +38,8 @@ out/**
 !out/scripts/
 !out/scripts/*.ps1
 !out/reports/
-!out/reports/_shell_*.rpt
-!out/reports/Report1.rpt
-!out/reports/PMSV10_IndPerfOverview*.rpt
+!out/archive/
+!out/archive/inputs/
+!out/archive/inputs/_shell_*.rpt
+!out/archive/inputs/Report1.rpt
+!out/archive/inputs/PMSV10_IndPerfOverview*.rpt

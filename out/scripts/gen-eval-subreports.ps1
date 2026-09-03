@@ -1,7 +1,7 @@
 # Lays out the six table sub-reports of the Individual Detailed Evaluation Report.
 #
-# Input:  out/reports/_shell_<name>.rpt   (blank shells, each bound to one procedure)
-# Output: out/reports/PMSV10_IndDetEval_<Name>.rpt
+# Input:  out/archive/inputs/_shell_<name>.rpt   (blank shells, each bound to one procedure)
+# Output: out/archive/reports/PMSV10_IndDetEval_<Name>.rpt
 #
 # These are sub-reports, so they carry NO page furniture of their own - no title, no
 # footer, no margins decoration. Just column headings (Page Header) and one bound row
@@ -151,12 +151,12 @@ foreach ($rep in $reports) {
   $shell = $shellFor[$rep.name]
   $plan = @{
     command    = 'apply'
-    reportPath = "D:/VibeyReports/out/reports/_shell_$shell.rpt"
-    outputPath = "D:/VibeyReports/out/reports/PMSV10_IndDetEval_$($rep.name).rpt"
+    reportPath = "D:/VibeyReports/out/archive/inputs/_shell_$shell.rpt"
+    outputPath = "D:/VibeyReports/out/archive/reports/PMSV10_IndDetEval_$($rep.name).rpt"
     overwrite  = $true
     plan       = @{ planVersion = 1; operations = $ops }
   }
-  $json = "D:\VibeyReports\out\json\eval-sub-$($rep.name).json"
+  $json = "D:\VibeyReports\out\archive\json\eval-sub-$($rep.name).json"
   [IO.File]::WriteAllText($json, ($plan | ConvertTo-Json -Depth 12 -Compress))
   Write-Output ("{0,-16} {1} cols  {2} ops  width {3}" -f $rep.name, $cols.Count, $ops.Count, $total)
 }
