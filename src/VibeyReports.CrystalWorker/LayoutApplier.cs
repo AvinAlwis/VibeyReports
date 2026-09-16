@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -811,6 +812,48 @@ namespace VibeyReports.CrystalWorker
             }
             if (op.ThousandsSeparator.HasValue) numeric.ThousandsSeparator = op.ThousandsSeparator.Value;
             if (op.SuppressIfZero.HasValue) numeric.EnableSuppressIfZero = op.SuppressIfZero.Value;
+
+            // Finding 3: without this a value of ZERO renders as NOTHING, silently.
+            //
+            // NumericFormat.ZeroValueString is the literal Crystal prints in place of a zero, and
+            // on a field built by addField it starts EMPTY. While EnableSystemDefault is on that
+            // does not matter -- Crystal formats from the locale and ignores the whole
+            // NumericFormat -- but this method has to switch EnableSystemDefault off (Finding 1)
+            // for the decimal places to apply at all, and from that moment the empty string is
+            // what a zero renders as.
+            //
+            // MEASURED on Report 2's Goal Alignment Overview tiles: an employee with
+            // total_goals=1, aligned=0, not_aligned=1 printed "1", nothing, "1".
+            // EnableSuppressIfZero was already false, so zero-suppression was not the cause;
+            // setting ZeroValueString to "0" made the tile read "1 0 1".
+            //
+            // Only filled in when it is empty AND zeros are not being deliberately suppressed, so
+            // a caller that wants blank zeros still gets them and a report that already carries a
+            // deliberate string ("-", "n/a") keeps it. The value matches the decimal places asked
+            // for, so a 2-decimal field shows "0.00" rather than a bare "0".
+            if (string.IsNullOrEmpty(numeric.ZeroValueString) && !numeric.EnableSuppressIfZero)
+            {
+                var places = op.DecimalPlaces ?? numeric.NDecimalPlaces;
+                if (places < 0) places = 0;
+                numeric.ZeroValueString = 0m.ToString("F" + places, CultureInfo.InvariantCulture);
+            }
+
+            // Finding 4: same trap as Finding 3, and far more visible. DecimalSeparator and
+            // ThousandSeparator ALSO start empty on a field built by addField, and once
+            // EnableSystemDefault is off Crystal uses them literally -- so a decimal number
+            // prints with no decimal point at all.
+            //
+            // MEASURED on Report 1: stage scores of 41.0000 and 43.0000 rendered as "4100" and
+            // "4300", and a total_score of 100.00 as "10000". Both fields had NDecimalPlaces = 2
+            // and DecimalSeparator = "".
+            //
+            // Invariant "." and "," rather than the machine's culture: the worker must produce the
+            // same report wherever it runs, and these reports are authored in that convention.
+            // Only filled in when empty, so a deliberate separator survives.
+            if (string.IsNullOrEmpty(numeric.DecimalSymbol))
+                numeric.DecimalSymbol = CultureInfo.InvariantCulture.NumberFormat.NumberDecimalSeparator;
+            if (string.IsNullOrEmpty(numeric.ThousandSymbol))
+                numeric.ThousandSymbol = CultureInfo.InvariantCulture.NumberFormat.NumberGroupSeparator;
         }
 
         /// <summary>
