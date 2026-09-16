@@ -512,23 +512,43 @@ For the record, the full ladder of failure modes now measured for `addTable`:
 | Set to a wrong value | `Logon failed ... [Database Vendor Code: 18456]` -- SQL Server's "login failed", i.e. the credential reached the server and was refused there |
 | Set correctly | `ok: true`, table added with server-discovered fields |
 
-## The RAS SDK cannot re-verify a report's schema (measured 2026-09-01)
+## The RAS SDK cannot re-verify a report's schema (measured 2026-09-01, corrected 2026-09-04)
 
 When a stored procedure gains a column, an existing `.rpt` does NOT see it. The report carries a
-cached result-set schema, and nothing in the RAS SDK refreshes it:
+cached result-set schema, and nothing in the RAS SDK refreshes it *usably*:
 
-- The only Verify-style method on the whole surface is
-  `ISCRDatabaseController.VerifyTableConnectivity(Object)`, which tests that a table is *reachable*.
-  There is no equivalent of the Designer's **Database > Verify Database**.
+- **`VerifyDatabase()` does exist** -- on `ISCDReportClientDocument`, the document, not the
+  database controller. The original note said no Verify-style method existed anywhere; that was
+  measured against `ISCRDatabaseController`, whose only such member really is
+  `VerifyTableConnectivity(Object)`, and the search never reached the document. The correction
+  does not change the conclusion: **the call is unusable here.** It throws a `COMException` whose
+  message is the empty string (surfacing as "No error") before doing any work, because the
+  report's saved connection carries no password and `VerifyDatabase` -- unlike `addTable` and
+  `setTableLocation` -- accepts no `ConnectionInfo` to inject one into. Measured against
+  `PMSV10_IndPerfOverview.rpt` and `PMSV10_GoalAlignCascade.rpt`.
 - Repointing a table at itself with `SetTableLocation` -- the usual trick -- **does not work**.
   Measured: `setTableLocation` on `sp_perf_goal_align_cascade;1` returned `ok: true`, and the
   reopened report still listed the original twelve fields with no sign of the newly added
   `emp_number`.
+- Worse, on a report with sub-reports it does not even save. `setTableLocation` on
+  `PMSV10_IndPerfOverview.rpt` -- pointed at itself OR at a different procedure -- reaches the
+  server and then fails in `SaveAs` with *"Failed to save database information. The file is in use
+  by another application. Error in File `C:\...\Temp\<name> {GUID}.rpt`"*. That path is Crystal's
+  own working copy of the open document. Loading with `OpenReportMethod.OpenReportByDefault`
+  instead of the default temp-copy mode does not help: the temp copy is made by RAS, not by
+  `ReportDocument.Load`. (That experiment also drags `CrystalDecisions.Enterprise.Framework` and
+  `.InfoStore` into the build, because two `Load` overloads mention `EnterpriseSession` and
+  `InfoObject` and C# resolves no overload until every candidate's types load. Reverted.)
 
-Consequence: after a procedure's result set changes, the report must be opened in the **Crystal
-Designer** and verified there before any operation can reference the new fields. Until then,
-`setSubreportLink` against a new column fails with COM "Invalid field name" -- which reads as a
-typo but is actually a stale schema.
+**What DOES work: `addTable`.** It discovers a table's columns from the server as it adds it. So
+the route for "a procedure's result set changed" is not to refresh the existing table but to add a
+*differently named* one, rebuild the objects against it, and `removeTable` the old -- which is why
+Report 1's multi-employee rewrite introduced `sp_perf_ind_perf_sheet` rather than altering
+`sp_perf_ind_perf_overview` in place.
+
+Otherwise, the report must be opened in the **Crystal Designer** and verified there before any
+operation can reference the new fields. Until then, `setSubreportLink` against a new column fails
+with COM "Invalid field name" -- which reads as a typo but is actually a stale schema.
 
 A sub-report embedded in a host report has its own cached schema, so it must be verified
 separately, from inside the sub-report, not just from the host.
@@ -1264,3 +1284,148 @@ that the failure surfaced as a bare label with no message.)
 
 **Order that holds:** layout first, `removeTable` second, as two separate applies against two
 separate files. `gen-goal-align-variants.ps1` is built that way deliberately and says so.
+
+## Text padding inside a field: `IndentAndSpacingFormat` (measured 2026-09-03)
+
+A field object has no margin. When a field spans its whole table cell — which the Goal Alignment
+detail row does deliberately, so the ruling can come from the cell's own border rather than from
+drawn lines a growing row would leave behind — every value sits hard against its own divider.
+Insetting the field geometry fixes the text and breaks the ruling, which is the trade the border
+approach existed to avoid.
+
+Crystal's own answer moves the TEXT inside the field without moving the field:
+
+```
+ISCRStringFieldFormat.IndentAndSpacingFormat
+    LeftIndent        (twips)
+    RightIndent       (twips)
+    FirstLineIndent   (twips)
+    LineSpacing / LineSpacingType
+```
+
+Reached as `fieldObject.FieldFormat.StringFormat.IndentAndSpacingFormat`, and written through the
+usual clone → `ReportObjectController.Modify(old, clone)` dance like every other RAS property.
+
+**Measured, and the reason Goal ID is centred rather than padded:** the indentation lives on
+`StringFormat` only. `NumericFormat` has no indentation member at all — its properties are
+currency/decimal/separator/rounding and nothing else — so a numeric field cannot be padded and
+centring is the only spacing it can have. (`FieldFormat.StringFormat` is nevertheless non-null on
+a numeric field, so a script that only checks for null will happily set an indent that the numeric
+formatter then ignores. Do not read "it did not throw" as "it worked" here.)
+
+Nothing on `ISCRCommonFieldFormat` does this: its entire surface is `ClassName`,
+`ConditionFormulas`, `EnableSuppressIfDuplicated`, `EnableSystemDefault`. Nor is it on
+`ObjectFormat`, which carries `HorizontalAlignment` and `EnableCanGrow` but no spacing.
+
+There is **no layout operation for this yet** — `out/scripts/set-detail-cell-padding.ps1` applies it
+as a pass over the saved `.rpt` between generating the sub-report and importing it into the host.
+It is a good candidate for a `setIndent` operation: it is a plain property write on a cloned object,
+the same shape as `setNumberFormat`, and the validator would only need to reject it on kinds with no
+`StringFormat` (Line, Box).
+
+---
+
+## Moving an object between sections, and what it leaves behind (measured 2026-09-07)
+
+RAS has no reparent call. The working idiom is `Clone(true)` -> `ReportObjectController.Add(clone,
+destination, -1)` -> `Remove(original)`, and it carries the object's **full** formatting across --
+including a `TextObject` whose paragraph holds an embedded field run. That is the one thing a
+remove-and-`addText` rebuild cannot reproduce: `addText` writes a literal
+`ParagraphTextElementClass`, so `"/ {sp_x;1.total_score}"` would print as itself. Verified by
+moving Report 1's `Text32` and `Text37` and reading the text back unchanged.
+
+**But the source section will not shrink afterwards.** Crystal holds a section's minimum height at
+the deepest object ever placed in it and moving that object out does not lower it. The stale value
+survives save and reopen, so it cannot be cleared by splitting the plan:
+
+| Emptying a 13104-twip Details section (30 objects, deepest bottom edge 4870) | `resizeSection` to 340 |
+|---|---|
+| all 30 moved out with `moveToSection` | COM 0x80042022 *"The section height is not valid"* -- and for every height below **4870** |
+| all 30 deleted with `removeObject` | `ok: true` |
+
+4870 is exactly `Box18`'s bottom (top 3460 + height 1410) in the layout before the move. The floor
+does not move when the destination sections are resized, and stepping the shrink down in several
+saved applies does not get under it either.
+
+Consequence for a section restructure: **rebuild, do not move.** Delete everything out of the
+section with `removeObject` and re-create it in the destination with `addText`/`addBox`/`addLine`.
+Reserve `moveToSection` for an object that genuinely cannot be reproduced, in a plan that does not
+then need to shrink where it came from.
+
+## `removeTable` needs the removals committed first (measured 2026-09-07)
+
+`removeTable` does not cascade -- it refuses while any object still binds the table, and names
+them. Removing those objects **in the same plan** is not enough: Crystal then rejects the
+`removeTable` with *"The request could not be submitted for background processing"*. Saving between
+the two clears it. So dropping a table is two applies, not one:
+
+1. `removeObject` every bound object (and any sub-report going with it), save;
+2. `removeTable`, save.
+
+Two things the validator's bound-object list does not include, and which have to be handled by
+hand:
+
+- A **text object with an embedded field** is not counted as bound (the validator sees a `Text`
+  with no `dataSource`), so `removeTable` will not complain about it -- but it must still go.
+- A **`FieldHeading`** is deleted by Crystal along with the field it labels. Removing 13 fields
+  from Report 1 silently took all 8 headings with them, and the next plan rejected every operation
+  naming one with "does not exist in the report". Do not list them for removal, and do plan to
+  rebuild them.
+
+---
+
+## A zero renders as NOTHING once `EnableSystemDefault` is off (measured 2026-09-07)
+
+`NumericFormat.ZeroValueString` is the literal Crystal prints in place of a zero, and on a field
+created by `addField` it starts **empty**. While `CommonFormat.EnableSystemDefault` is on that does
+not matter -- Crystal formats from the locale and ignores the whole `NumericFormat`. But
+`setNumberFormat` has to switch `EnableSystemDefault` off for the decimal places to apply at all
+(Finding 1), and from that moment an empty `ZeroValueString` is what a zero renders as: blank.
+
+Measured on Report 2's Goal Alignment Overview tiles. An employee with `total_goals = 1`,
+`aligned = 0`, `not_aligned = 1` printed **`1`, nothing, `1`**. `EnableSuppressIfZero` was already
+`False`, so zero-suppression was not the cause and setting it explicitly changed nothing; setting
+`ZeroValueString = "0"` made the row read `1  0  1`.
+
+`setNumberFormat` now fills it in -- only when it is empty and zeros are not being deliberately
+suppressed, at the decimal places asked for, so a 2-decimal field shows `0.00`. A caller that wants
+blank zeros still gets them via `suppressIfZero`, and a report that already carries a deliberate
+string (`-`, `n/a`) keeps it.
+
+**Every numeric field this tool has ever created was affected**, silently. Anywhere a real zero
+occurred, it was simply missing from the output.
+
+## An empty Report Header still costs a page (measured 2026-09-07)
+
+With `newPageBefore` on a group header, the Report Header prints first and the first group is
+pushed onto page 2 -- so the report opens on a blank page. Report 1's Report Header held nothing
+and was **10 twips** tall, which was enough. Reported from Report Navigator, reproduced by pushing
+the real datasets in and exporting: **2 PDF pages for one employee, 1 after suppressing the
+section.**
+
+Resizing to 0 is not equivalent: a zero-height section still lays out. Report 2's Report Header is
+0 tall and shows no blank page only because nothing forces a break before it. `setSuppress` on the
+section is the fix, and both generators now apply it.
+
+Crystal's own answer is a conditional `New Page Before` (`Not OnFirstRecord`), which needs a
+formula this API cannot write -- suppressing the section achieves the same thing.
+
+## `removeTable`'s heap corruption is intermittent (measured 2026-09-07)
+
+`gen-goal-align-variants.ps1` -- a plan against an already-cascaded report -- died with
+`STATUS_HEAP_CORRUPTION` (exit `0xC0000374`, no response at all), then **succeeded unchanged on the
+very next run**. Treat this crash as flaky rather than deterministic: retry once before believing
+the plan is at fault. Ordering a plan so a large removal batch does not follow an `addTable` in the
+next apply makes it much rarer (see `gen-goalalign-multi.ps1`).
+
+## Verifying a push-model report end to end
+
+Neither `render` nor the Designer can preview an `RN_SP = '1'` report: it declares parameters with
+no saved values, so `Export` throws *"Missing parameter values."* The way to see what Report
+Navigator will actually produce is to reproduce `SPViewer.BindReport` -- run each procedure through
+`SqlClient`, `SetDataSource` the resulting `DataTable` onto the main report and onto each
+sub-report, then export. Page counts and rendered values both come out, and the text export
+(`ExportToDisk("Text", ...)`, plain UTF-8) is the quickest way to read the values back.
+
+Two traps: `Table.Location` carries the result-set suffix (`sp_x;1`) that SqlClient reads as a
+numbered-procedure reference and must be stripped, and `Table.Name` is the ALIAS, not the procedure.
