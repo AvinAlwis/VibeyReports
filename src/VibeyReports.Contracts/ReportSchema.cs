@@ -86,6 +86,9 @@ public sealed class ObjectInfo
     /// <summary>"#RRGGBB" outline colour for Line/Box objects; null when not applicable.</summary>
     public string? LineColorHex { get; set; }
 
+    /// <summary>Line weight in twips for a Box outline or a Line. Null for every other kind.</summary>
+    public int? LineThicknessTwips { get; set; }
+
     /// <summary>
     /// Populated only for Kind == "Subreport". Null otherwise. The embedded sub-report's OWN
     /// name, which is a different string from <see cref="Name"/>: Crystal auto-numbers the placed

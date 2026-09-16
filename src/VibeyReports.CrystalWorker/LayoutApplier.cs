@@ -146,6 +146,14 @@ namespace VibeyReports.CrystalWorker
                             AddField(doc, op);
                             break;
 
+                        case LayoutActions.SetLineThickness:
+                            ModifyObject(doc, op.Target, o => SetLineThickness(o, op.LineThicknessTwips.Value));
+                            break;
+
+                        case LayoutActions.MoveToSection:
+                            MoveToSection(doc, op);
+                            break;
+
                         case LayoutActions.RemoveObject:
                             result.RemovedObjects.Add(RemoveObject(doc, op.Target));
                             break;
@@ -373,6 +381,57 @@ namespace VibeyReports.CrystalWorker
         /// which FindObject matches case-insensitively) so RemovedObjects reports the report's
         /// actual name rather than echoing whatever casing the caller used.
         /// </summary>
+        /// <summary>
+        /// Changes which SECTION an object belongs to. Crystal has no reparent call, so this is
+        /// clone -> Add to the destination -> Remove the original, which is the one route that
+        /// carries the object's full formatting across. That matters most for a TextObject whose
+        /// paragraph holds an embedded field run (Report 1's "{...overall_rating}" tiles): a
+        /// remove-then-addText rebuild would turn the field into its own literal source text, and
+        /// there is no operation that re-embeds one.
+        ///
+        /// Remove runs BEFORE Add so the report never holds two objects of the same Name. If Add
+        /// then throws, the object is gone from the in-memory document -- but Apply faults the
+        /// session on any exception and nothing is saved, so the source .rpt is untouched and the
+        /// caller simply reruns.
+        ///
+        /// KNOWN DEFECT, measured 2026-09-07, and the reason Report 1's restructure does not use
+        /// this operation. Crystal keeps the SOURCE section's minimum height at the deepest object
+        /// that was ever placed in it, and moving the object out does not lower it. The staleness
+        /// survives save and reopen. After moving all 30 objects out of a 13104-twip Details
+        /// section, "resizeSection" on that section was refused with COM 0x80042022 "The section
+        /// height is not valid" for every height below 4870 -- exactly the bottom edge of the
+        /// deepest object that had been moved. Removing the same objects with removeObject instead
+        /// let the section shrink to 340 immediately.
+        ///
+        /// So this is safe for relocating an object you could not otherwise reproduce -- a text
+        /// object with an embedded field run is the case it exists for -- but if the plan needs to
+        /// SHRINK the section afterwards, remove and rebuild instead.
+        /// </summary>
+        private static void MoveToSection(ISCDReportClientDocument doc, LayoutOperation op)
+        {
+            var existing = FindObject(doc, op.Target);
+            var destination = FindSection(doc, op.Section);
+            var clone = (ISCRReportObject)existing.Clone(true);
+
+            // Section coordinates are section-relative, so an object keeps its old y unless the
+            // caller gives a new one -- see the validator's note.
+            if (op.LeftTwips.HasValue) clone.Left = op.LeftTwips.Value;
+            if (op.TopTwips.HasValue) clone.Top = op.TopTwips.Value;
+            SyncEndpoints(clone);
+
+            var controller = doc.ReportDefController.ReportObjectController;
+            try
+            {
+                controller.Remove(existing);
+                controller.Add(clone, destination, -1);
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Crystal rejected \"moveToSection\" for \"{op.Target}\" into \"{op.Section}\": {ex.Message.Trim()}", ex);
+            }
+        }
+
         private static string RemoveObject(ISCDReportClientDocument doc, string objectName)
         {
             var existing = FindObject(doc, objectName);
@@ -854,6 +913,24 @@ namespace VibeyReports.CrystalWorker
                 numeric.DecimalSymbol = CultureInfo.InvariantCulture.NumberFormat.NumberDecimalSeparator;
             if (string.IsNullOrEmpty(numeric.ThousandSymbol))
                 numeric.ThousandSymbol = CultureInfo.InvariantCulture.NumberFormat.NumberGroupSeparator;
+        }
+
+        /// <summary>
+        /// Line weight in twips, for a Box's outline or a Line. Crystal defaults a newly
+        /// constructed object to 15 (about a quarter-point); the reports here use 10 for a hairline
+        /// panel divider and 20 for a heavier tile outline, and rebuilding an object without
+        /// restoring this flattens every rule on the page to the same middling weight.
+        /// </summary>
+        private static void SetLineThickness(ISCRReportObject obj, int twips)
+        {
+            switch (obj)
+            {
+                case ISCRBoxObject box: box.LineThickness = twips; break;
+                case ISCRLineObject line: line.LineThickness = twips; break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Object \"{obj.Name}\" ({obj.Kind}) is not a Line or Box and has no line thickness.");
+            }
         }
 
         /// <summary>

@@ -33,6 +33,8 @@ public static class LayoutActions
     public const string AddGroup = "addGroup";
     public const string AddSort = "addSort";
     public const string SetBorder = "setBorder";
+    public const string MoveToSection = "moveToSection";
+    public const string SetLineThickness = "setLineThickness";
 
     public static readonly string[] All =
     {
@@ -42,7 +44,8 @@ public static class LayoutActions
         RemoveTable, AddTable, SetTableLocation,
         SetSectionBreak, AddSpecialField, SetNumberFormat, SetCanGrow, SetSuppress,
         AddGroup, AddSort,
-        SetBorder
+        SetBorder,
+        MoveToSection, SetLineThickness
     };
 }
 
@@ -228,6 +231,13 @@ public sealed class LayoutOperation
 
     /// <summary>setNumberFormat: print nothing when the value is zero. Optional.</summary>
     public bool? SuppressIfZero { get; set; }
+
+    /// <summary>
+    /// setLineThickness: line weight in twips for a Box outline or a Line, 0-100. Crystal
+    /// defaults a newly constructed object to 15; these reports use 10 for a hairline divider
+    /// and 20 for a heavier outline, so a rebuild that omits it flattens every rule on the page.
+    /// </summary>
+    public int? LineThicknessTwips { get; set; }
 
     /// <summary>setCanGrow: let the object grow vertically to fit its content. Required for setCanGrow.</summary>
     public bool? CanGrow { get; set; }

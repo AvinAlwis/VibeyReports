@@ -253,7 +253,7 @@ public static class LayoutPlanValidator
             or LayoutActions.RemoveObject
             or LayoutActions.SetTextColor or LayoutActions.SetFillColor or LayoutActions.SetLineColor
             or LayoutActions.SetNumberFormat or LayoutActions.SetCanGrow
-            or LayoutActions.SetBorder
+            or LayoutActions.SetBorder or LayoutActions.MoveToSection or LayoutActions.SetLineThickness
             || suppressOnObject;
         // F2: setSubreportLink is deliberately NOT in needsTarget -- its target is resolved
         // against subreportsByName (the SubreportName name-space), not `objects` (the report
@@ -274,6 +274,7 @@ public static class LayoutPlanValidator
             or LayoutActions.AddBox or LayoutActions.ResizeSection or LayoutActions.AddField
             or LayoutActions.SetSectionBackground or LayoutActions.AddSubreport
             or LayoutActions.SetSectionBreak or LayoutActions.AddSpecialField
+            or LayoutActions.MoveToSection
             || suppressOnSection;
 
         SimObject? target = null;
@@ -912,6 +913,61 @@ public static class LayoutPlanValidator
                     }
 
                     if (errs.Count == 0) sectionHeights[op.Section!] = h;
+                }
+                break;
+            }
+
+            case LayoutActions.SetLineThickness:
+            {
+                if (op.LineThicknessTwips is null) { Err("\"setLineThickness\" requires \"lineThicknessTwips\"."); return errs; }
+                var lt = op.LineThicknessTwips.Value;
+                // Crystal stores this in twips. Negative is meaningless and a very large value
+                // would draw a filled block rather than a rule, so the range is bounded here
+                // rather than at the COM boundary.
+                if (lt < 0 || lt > 100)
+                    Err($"\"lineThicknessTwips\" must be between 0 and 100 twips; got {lt}.");
+                else if (!string.Equals(target!.Kind, "Box", StringComparison.OrdinalIgnoreCase)
+                      && !string.Equals(target.Kind, "Line", StringComparison.OrdinalIgnoreCase))
+                    Err($"\"{op.Target}\" is a {target.Kind}; only a Box or a Line has a line thickness.");
+                break;
+            }
+
+            case LayoutActions.MoveToSection:
+            {
+                // The one operation that changes an object's OWNER rather than a property of it.
+                // Crystal cannot reparent in place: the applier clones, removes and re-adds, so
+                // the object keeps every format the clone carries -- including a text object's
+                // embedded field runs, which addText cannot reproduce. That is the whole reason
+                // this exists rather than "removeObject then addText".
+                //
+                // Left/top are OPTIONAL and default to the object's current position, because a
+                // section's coordinate space starts at its own top: an object at y=8152 in a
+                // 13104-tall Details section keeps y=8152 when it lands in a 1300-tall group
+                // footer and is clipped. Supplying topTwips is the normal case, not the exception.
+                var newLeft = op.LeftTwips ?? target!.Left;
+                var newTop = op.TopTwips ?? target!.Top;
+                if (newLeft < 0 || newTop < 0) { Err("Coordinates must not be negative."); return errs; }
+
+                if (string.Equals(target!.Section, op.Section, StringComparison.OrdinalIgnoreCase))
+                {
+                    Err($"\"{op.Target}\" is already in section \"{op.Section}\"; use \"move\" to reposition it.");
+                    return errs;
+                }
+
+                // F2: long arithmetic, same as the add operations, so a huge left/top cannot wrap.
+                var right = (long)newLeft + target.Width;
+                var bottom = (long)newTop + target.Height;
+                if (right > printableWidth)
+                    Err($"\"{op.Target}\" would end at {right}, past the printable width of {printableWidth}.");
+                if (bottom > sectionHeights[op.Section!])
+                    Err($"\"{op.Target}\" would end at {bottom}, past the height of section \"{op.Section}\" " +
+                        $"({sectionHeights[op.Section!]}). Resize the section first, or give a smaller topTwips.");
+
+                if (errs.Count == 0)
+                {
+                    target.Section = op.Section!;
+                    target.Left = newLeft;
+                    target.Top = newTop;
                 }
                 break;
             }

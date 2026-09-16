@@ -262,10 +262,15 @@ namespace VibeyReports.CrystalWorker
                 case ISCRBoxObject box:
                     info.FillColorHex = ColorRef.ToHex(box.FillColor);
                     info.LineColorHex = ColorRef.ToHex(box.LineColor);
+                    // Without this a rebuild flattens every rule to Crystal's default weight of
+                    // 15 twips. These reports use 10 for a hairline panel divider and 20 for a
+                    // heavier tile outline, and the difference is plainly visible.
+                    info.LineThicknessTwips = box.LineThickness;
                     break;
 
                 case ISCRLineObject line:
                     info.LineColorHex = ColorRef.ToHex(line.LineColor);
+                    info.LineThicknessTwips = line.LineThickness;
                     break;
 
                 case ISCRSubreportObject subreport:

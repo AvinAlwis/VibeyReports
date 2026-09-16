@@ -78,9 +78,10 @@ public class LayoutPlanTests
             "removeTable", "addTable", "setTableLocation",
             "setSectionBreak", "addSpecialField", "setNumberFormat", "setCanGrow", "setSuppress",
             "addGroup", "addSort",
-            "setBorder"
+            "setBorder",
+            "moveToSection", "setLineThickness"
         });
-        LayoutActions.All.Should().HaveCount(29);
+        LayoutActions.All.Should().HaveCount(31);
     }
 
     [Fact]
