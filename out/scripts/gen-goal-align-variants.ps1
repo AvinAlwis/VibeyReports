@@ -38,18 +38,63 @@ function Op($h) { [void]$ops.Add($h) }
 # --------------------------------------------------------------------------------------------
 # 1. Header - Generated timestamp, grouped tight against the right margin (body ends at 11186).
 #    FontAnchor (the system title) ends at 6100, so this strip starts well clear of it.
+#
+#    "Generated" is right-aligned so it ends at a known x; the date and time are LEFT-aligned so
+#    each starts at a known x. That is what makes the two gaps fixed and small (150 twips). With
+#    all three right-aligned the text's left edge floated on its own width, which is what left
+#    the first version reading "Generated        03/09/2026        16:19:05".
 # --------------------------------------------------------------------------------------------
 Op @{ action='addText'; section=$RH; newName='MetaGenLbl'; text='Generated'
-      leftTwips=7000; topTwips=70; widthTwips=1300; heightTwips=200 }
+      leftTwips=7800; topTwips=70; widthTwips=1350; heightTwips=200 }          # ends 9150
 Op @{ action='addSpecialField'; section=$RH; newName='MetaGenDate'; specialType='printDate'
-      leftTwips=8400; topTwips=70; widthTwips=1500; heightTwips=200 }
+      leftTwips=9300; topTwips=70; widthTwips=1000; heightTwips=200 }          # starts 9300
 Op @{ action='addSpecialField'; section=$RH; newName='MetaGenTime'; specialType='printTime'
-      leftTwips=10000; topTwips=70; widthTwips=1186; heightTwips=200 }
+      leftTwips=10330; topTwips=70; widthTwips=856; heightTwips=200 }          # starts 10330
 foreach ($n in 'MetaGenLbl','MetaGenDate','MetaGenTime') {
     Op @{ action='setFontSize';  target=$n; fontSizePt=8 }
-    Op @{ action='setAlignment'; target=$n; alignment='Right' }
     Op @{ action='setTextColor'; target=$n; color=$MUTED }
 }
+Op @{ action='setAlignment'; target='MetaGenLbl';  alignment='Right' }
+Op @{ action='setAlignment'; target='MetaGenDate'; alignment='Left' }
+Op @{ action='setAlignment'; target='MetaGenTime'; alignment='Left' }
+
+# --------------------------------------------------------------------------------------------
+# 1b. Overview tiles - make the numbers actually centre.
+#
+# The three tile fields were already alignment=Centre and still rendered off-centre, because
+# EnableSystemDefault was left TRUE on their number format. sdk-notes.md records what that gate
+# does: Crystal formats from locale defaults and silently discards the field's own settings, so
+# the glyphs are laid out against a format nobody in this report chose. setNumberFormat clears
+# the gate as its first act, which is what makes the centring stick.
+#
+# These are counts - no decimals, no thousands separator.
+# --------------------------------------------------------------------------------------------
+foreach ($t in 'B2T0num','B2T1num','B2T3num') {
+    Op @{ action='setNumberFormat'; target=$t; decimalPlaces=0; thousandsSeparator=$false }
+    Op @{ action='setAlignment';    target=$t; alignment='Centre' }
+}
+
+# --------------------------------------------------------------------------------------------
+# 1c. Company logo, as a SUB-REPORT rather than a second table on the main report.
+#
+# Report Navigator's SP mode pushes one DataTable into the main report, so a second main-report
+# table never receives data and Crystal falls back to its own connection ("Database logon
+# failed"). A sub-report gets its own push, keyed by name from HS_HR_RN_SUBRPT_SP_MAP - which is
+# how PMSV10_IndPerfOverview.rpt has always carried its logo.
+#
+# Requires, on the database side:
+#   * sp_perf_company_logo taking the same five parameters as the others, because
+#     OraBuildSubReport binds every registered parameter to every sub-report procedure
+#   * INSERT HS_HR_RN_SUBRPT_SP_MAP ('660755', 'companylogo', 'sp_perf_company_logo')
+#     - RN_SUBRPT_NAME must equal the sub-report's ReportDocument.Name, i.e. 'companylogo'
+#
+# The blob field it replaces is removed explicitly rather than left to stage 2's removeTable
+# cascade, so the two never overlap in the header.
+# --------------------------------------------------------------------------------------------
+Op @{ action='removeObject'; target='HIELOGOIMAGE1' }
+Op @{ action='addSubreport'; section=$RH; newName='companylogo'
+      reportPath="$root/out/archive/reports/PMSV10_GoalAlignLogo.rpt"
+      leftTwips=0; topTwips=60; widthTwips=800; heightTwips=640 }
 
 # --------------------------------------------------------------------------------------------
 # 2. Re-import the detail sub-report WITHOUT field links.
@@ -119,7 +164,17 @@ function ConvertTo-AsciiJson($Object) {
     }) -join ''
 }
 
-function Invoke-Worker($Label, $Request) {
+# STATUS_HEAP_CORRUPTION is a known, INTERMITTENT failure of this Crystal build: the worker
+# dies with exit 0xC0000374 and returns nothing at all. Measured today on the same unchanged
+# plan - failed, then succeeded on the next run, then failed four times in a row. It is made
+# more likely by how much COM string writing a plan does (setNumberFormat now writes three
+# format strings), but it predates that and is not caused by it.
+#
+# A crashed worker writes NOTHING - the output file is only produced by a successful SaveAs -
+# so re-running the identical request is safe and is the only thing that helps.
+$HEAP_CORRUPTION = -1073740940   # 0xC0000374
+
+function Invoke-Worker($Label, $Request, [int]$Attempt = 1) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $worker
     $psi.UseShellExecute = $false
@@ -142,6 +197,10 @@ function Invoke-Worker($Label, $Request) {
     # no message at all. Report the raw streams when there is no parsable response.
     $res = if ([string]::IsNullOrWhiteSpace($raw)) { $null } else { $raw | ConvertFrom-Json }
     if ($null -eq $res) {
+        if ($p.ExitCode -eq $HEAP_CORRUPTION -and $Attempt -lt 4) {
+            Write-Output ("  {0}: worker died with STATUS_HEAP_CORRUPTION, retry {1}/3" -f $Label, $Attempt)
+            return Invoke-Worker $Label $Request ($Attempt + 1)
+        }
         throw "$Label`: the worker returned no response (exit $($p.ExitCode)).`nstderr:`n$err"
     }
     if (-not $res.ok) {
@@ -168,6 +227,22 @@ foreach ($v in $variants) {
         outputPath = $tmp
         overwrite  = $true
         plan       = @{ planVersion = 1; operations = $ops.ToArray() }
+    }
+
+    # Crystal gives a placed sub-report a single black border by default, which draws a box around
+    # the logo and a second rule around the details table. Clearing it has to happen in a LATER
+    # apply than the addSubreport, because the name it has to target does not exist while the plan
+    # that creates it is being validated: ImportSubreportEx's newName becomes the sub-report's
+    # SubreportName, while the placed OBJECT is auto-numbered by Crystal (sdk-notes.md). So the
+    # names are read back off stage 1's output rather than assumed.
+    $stage2 = New-Object System.Collections.ArrayList
+    foreach ($sec in $r1.schema.sections) {
+        foreach ($o in $sec.objects) {
+            if ($o.kind -eq 'Subreport') {
+                [void]$stage2.Add(@{ action='setBorder'; target=$o.name
+                                     left='none'; right='none'; top='none'; bottom='none' })
+            }
+        }
     }
 
     # STAGE 2 - drop the company-logo procedure, temp -> final.
@@ -197,7 +272,8 @@ foreach ($v in $variants) {
         reportPath = $tmp
         outputPath = $v.out
         overwrite  = $true
-        plan       = @{ planVersion = 1; operations = @(@{ action='removeTable'; target='sp_perf_company_logo;1' }) }
+        plan       = @{ planVersion = 1
+                        operations = @($stage2.ToArray()) + @(@{ action='removeTable'; target='sp_perf_company_logo;1' }) }
     }
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 
