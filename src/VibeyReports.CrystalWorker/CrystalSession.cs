@@ -63,7 +63,15 @@ namespace VibeyReports.CrystalWorker
             return new CrystalSession(engineDoc, full);
         }
 
-        public void SaveAs(string destinationPath, bool overwrite)
+        public void SaveAs(string destinationPath, bool overwrite) => SaveAs(destinationPath, overwrite, null);
+
+        /// <summary>
+        /// Saves, then hands the saved file (still under its temporary name) to
+        /// <paramref name="verifySaved"/> before it is moved over the destination. If the callback
+        /// throws, the temporary file is deleted and the destination is left exactly as it was, so
+        /// "ok:false implies nothing was written" holds for anything the callback does too.
+        /// </summary>
+        public void SaveAs(string destinationPath, bool overwrite, Action<string> verifySaved)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CrystalSession));
             if (_faulted)
@@ -100,6 +108,8 @@ namespace VibeyReports.CrystalWorker
             {
                 // SaveAs(name, directory, options). 0 = crReportOptionDefault.
                 Document.SaveAs(tempName, dir, 0);
+
+                verifySaved?.Invoke(tempFull);
 
                 if (File.Exists(full)) File.Delete(full);
                 File.Move(tempFull, full);

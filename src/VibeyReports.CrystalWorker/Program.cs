@@ -107,20 +107,27 @@ namespace VibeyReports.CrystalWorker
                             return WorkerResponse.Failure("Layout plan failed validation.", ex.Result);
                         }
 
-                        // Read the resulting schema BEFORE saving (round-1 fix F1). ReportReader.Read
-                        // can throw on a freshly-added object read back without a reopen - this is
-                        // the same RAS quirk LayoutApplierTests' ApplyAndReread helper works around by
-                        // closing and reopening. Reading after SaveAs would risk "ok:false" while a
-                        // real .rpt already sits on disk, a state the protocol has no way to express
-                        // and Task 9's client cannot distinguish from a clean failure. Reading first
-                        // makes "ok:false implies nothing was written" structurally true.
-                        var schema = ReportReader.Read(session);
-
+                        // The schema comes from a fresh open of the SAVED file, not from this session.
+                        // Crystal changes some things only when it saves - a border grows its section,
+                        // numeric formatting on a String field is discarded - so an in-memory read
+                        // reports what was asked for rather than what was kept (docs/sdk-notes.md,
+                        // 2026-09-17). A fresh open also sidesteps the RAS quirk where a freshly-added
+                        // object can throw when read back without a reopen.
+                        //
+                        // The read runs on the temporary file, before SaveAs moves it over the
+                        // destination, so a read that throws still leaves nothing written and
+                        // "ok:false implies nothing was written" stays true (round-1 fix F1).
+                        //
                         // If a mid-plan failure had occurred, LayoutApplier would have marked the
                         // session faulted and thrown before reaching this line; that exception is not
                         // caught here, so it propagates to Main's outer catch, and SaveAs is never
                         // reached - no output file is written (task-8-supplement.md C4).
-                        session.SaveAs(request.OutputPath, request.Overwrite);
+                        ReportSchema schema = null;
+                        session.SaveAs(request.OutputPath, request.Overwrite, savedPath =>
+                        {
+                            using (var saved = CrystalSession.Open(savedPath))
+                                schema = ReportReader.Read(saved);
+                        });
 
                         var response = WorkerResponse.Success();
                         response.OperationsApplied = applyResult.OperationsApplied;

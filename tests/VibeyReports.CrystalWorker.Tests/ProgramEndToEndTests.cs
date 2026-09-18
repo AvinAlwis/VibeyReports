@@ -152,6 +152,47 @@ public class ProgramEndToEndTests
         finally { if (File.Exists(dest)) File.Delete(dest); }
     }
 
+    /// <summary>
+    /// Crystal grows a section at save to fit a border it holds (docs/sdk-notes.md, 2026-09-17):
+    /// with this plan SampleReport's DetailSection1 is 221 twips in memory but 261 in the saved file. The schema apply returns must describe the saved file, so it has to match a fresh read.
+    /// </summary>
+    [Fact]
+    public void Apply_ReturnsTheSchemaOfTheSavedFileNotTheInMemoryDocument()
+    {
+        var dest = Path.Combine(Path.GetTempPath(), $"vibey_{Guid.NewGuid():N}.rpt");
+        try
+        {
+            var response = Run(new WorkerRequest
+            {
+                Command = WorkerCommands.Apply,
+                ReportPath = Fixtures.SampleReport,
+                OutputPath = dest,
+                Plan = new LayoutPlan
+                {
+                    Operations =
+                    {
+                        new LayoutOperation
+                        {
+                            Action = LayoutActions.SetBorder, Target = "CardName1",
+                            Left = BorderStyles.Single, Right = BorderStyles.Single,
+                            Top = BorderStyles.Single, Bottom = BorderStyles.Single
+                        }
+                    }
+                }
+            });
+            response.Ok.Should().BeTrue(because: response.Error);
+
+            var reread = Run(new WorkerRequest { Command = WorkerCommands.Read, ReportPath = dest });
+            reread.Ok.Should().BeTrue(because: reread.Error);
+
+            static int DetailHeight(ReportSchema s) => s.Sections.Single(x => x.Name == "DetailSection1").HeightTwips;
+            DetailHeight(response.Schema!).Should().Be(DetailHeight(reread.Schema!));
+            DetailHeight(response.Schema!).Should().BeGreaterThan(221, because: "Crystal grows the section to fit the border at save");
+            response.Schema!.ReportPath.Should().Be(response.OutputPath);
+        }
+        finally { if (File.Exists(dest)) File.Delete(dest); }
+    }
+
     [Fact]
     public void Apply_WithAnInvalidPlan_ReturnsOkFalseAndValidationErrorsWithoutCrashing()
     {
