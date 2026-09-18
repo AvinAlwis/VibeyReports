@@ -37,6 +37,15 @@ out/**
 !out/
 !out/scripts/
 !out/scripts/*.ps1
+# subedit: the RAS tool for what the worker cannot do (sub-report edits, drawn table grids,
+# column-list refresh). Its SOURCE and plan/style scripts carry no report data; bin/obj stay
+# ignored by the rules above.
+!out/tools/
+!out/tools/subedit/
+!out/tools/subedit/*.cs
+!out/tools/subedit/*.csproj
+!out/tools/subedit/*.js
+!out/tools/subedit/*.json
 !out/reports/
 !out/archive/
 !out/archive/inputs/

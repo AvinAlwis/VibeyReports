@@ -1,0 +1,269 @@
+[
+ {
+  "action": "setBorder",
+  "target": "GTR0",
+  "left": "none",
+  "right": "none",
+  "bottom": "none"
+ },
+ {
+  "action": "resize",
+  "target": "GTR0",
+  "widthTwips": 460,
+  "heightTwips": 220
+ },
+ {
+  "action": "move",
+  "target": "GTR0",
+  "leftTwips": 70,
+  "topTwips": 90
+ },
+ {
+  "action": "setCanGrow",
+  "target": "GTR0",
+  "canGrow": true
+ },
+ {
+  "action": "setBorder",
+  "target": "GTR1",
+  "left": "none",
+  "right": "none",
+  "bottom": "none"
+ },
+ {
+  "action": "resize",
+  "target": "GTR1",
+  "widthTwips": 2960,
+  "heightTwips": 220
+ },
+ {
+  "action": "move",
+  "target": "GTR1",
+  "leftTwips": 670,
+  "topTwips": 90
+ },
+ {
+  "action": "setCanGrow",
+  "target": "GTR1",
+  "canGrow": true
+ },
+ {
+  "action": "setBorder",
+  "target": "GTR2",
+  "left": "none",
+  "right": "none",
+  "bottom": "none"
+ },
+ {
+  "action": "resize",
+  "target": "GTR2",
+  "widthTwips": 1160,
+  "heightTwips": 220
+ },
+ {
+  "action": "move",
+  "target": "GTR2",
+  "leftTwips": 3770,
+  "topTwips": 90
+ },
+ {
+  "action": "setCanGrow",
+  "target": "GTR2",
+  "canGrow": true
+ },
+ {
+  "action": "setBorder",
+  "target": "GTR3",
+  "left": "none",
+  "right": "none",
+  "bottom": "none"
+ },
+ {
+  "action": "resize",
+  "target": "GTR3",
+  "widthTwips": 4060,
+  "heightTwips": 220
+ },
+ {
+  "action": "move",
+  "target": "GTR3",
+  "leftTwips": 5070,
+  "topTwips": 90
+ },
+ {
+  "action": "setCanGrow",
+  "target": "GTR3",
+  "canGrow": true
+ },
+ {
+  "action": "setBorder",
+  "target": "GTR4",
+  "left": "none",
+  "right": "none",
+  "bottom": "none"
+ },
+ {
+  "action": "resize",
+  "target": "GTR4",
+  "widthTwips": 1846,
+  "heightTwips": 220
+ },
+ {
+  "action": "move",
+  "target": "GTR4",
+  "leftTwips": 9270,
+  "topTwips": 90
+ },
+ {
+  "action": "setCanGrow",
+  "target": "GTR4",
+  "canGrow": true
+ },
+ {
+  "action": "resizeSection",
+  "section": "DetailSection1",
+  "heightTwips": 400
+ },
+ {
+  "action": "addBox",
+  "section": "DetailSection1",
+  "newName": "GoalRowBox",
+  "leftTwips": 0,
+  "topTwips": 0,
+  "widthTwips": 11186,
+  "heightTwips": 400
+ },
+ {
+  "action": "setLineColor",
+  "target": "GoalRowBox",
+  "color": "#D5D9DE"
+ },
+ {
+  "action": "setLineThickness",
+  "target": "GoalRowBox",
+  "lineThicknessTwips": 15
+ },
+ {
+  "action": "addLine",
+  "section": "DetailSection1",
+  "newName": "GoalRowV1",
+  "leftTwips": 600,
+  "topTwips": 0,
+  "widthTwips": 0,
+  "heightTwips": 400
+ },
+ {
+  "action": "setLineColor",
+  "target": "GoalRowV1",
+  "color": "#D5D9DE"
+ },
+ {
+  "action": "setLineThickness",
+  "target": "GoalRowV1",
+  "lineThicknessTwips": 15
+ },
+ {
+  "action": "addLine",
+  "section": "DetailSection1",
+  "newName": "GoalRowV2",
+  "leftTwips": 3700,
+  "topTwips": 0,
+  "widthTwips": 0,
+  "heightTwips": 400
+ },
+ {
+  "action": "setLineColor",
+  "target": "GoalRowV2",
+  "color": "#D5D9DE"
+ },
+ {
+  "action": "setLineThickness",
+  "target": "GoalRowV2",
+  "lineThicknessTwips": 15
+ },
+ {
+  "action": "addLine",
+  "section": "DetailSection1",
+  "newName": "GoalRowV3",
+  "leftTwips": 5000,
+  "topTwips": 0,
+  "widthTwips": 0,
+  "heightTwips": 400
+ },
+ {
+  "action": "setLineColor",
+  "target": "GoalRowV3",
+  "color": "#D5D9DE"
+ },
+ {
+  "action": "setLineThickness",
+  "target": "GoalRowV3",
+  "lineThicknessTwips": 15
+ },
+ {
+  "action": "addLine",
+  "section": "DetailSection1",
+  "newName": "GoalRowV4",
+  "leftTwips": 9200,
+  "topTwips": 0,
+  "widthTwips": 0,
+  "heightTwips": 400
+ },
+ {
+  "action": "setLineColor",
+  "target": "GoalRowV4",
+  "color": "#D5D9DE"
+ },
+ {
+  "action": "setLineThickness",
+  "target": "GoalRowV4",
+  "lineThicknessTwips": 15
+ },
+ {
+  "action": "resizeSection",
+  "section": "empdisplaynumberFooterSection1",
+  "heightTwips": 1950
+ },
+ {
+  "action": "move",
+  "target": "LegGlyphNotAligned",
+  "leftTwips": 200,
+  "topTwips": 1160
+ },
+ {
+  "action": "move",
+  "target": "LegTextNotAligned",
+  "leftTwips": 560,
+  "topTwips": 1160
+ },
+ {
+  "action": "move",
+  "target": "LegGlyphAligned",
+  "leftTwips": 200,
+  "topTwips": 830
+ },
+ {
+  "action": "move",
+  "target": "LegTextAligned",
+  "leftTwips": 560,
+  "topTwips": 830
+ },
+ {
+  "action": "move",
+  "target": "B4Box",
+  "leftTwips": 0,
+  "topTwips": 570
+ },
+ {
+  "action": "move",
+  "target": "B4Title",
+  "leftTwips": 150,
+  "topTwips": 245
+ },
+ {
+  "action": "move",
+  "target": "B4Banner",
+  "leftTwips": 0,
+  "topTwips": 150
+ }
+]

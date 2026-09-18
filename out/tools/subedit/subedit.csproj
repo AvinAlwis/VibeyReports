@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <AssemblyName>subedit</AssemblyName><LangVersion>latest</LangVersion>
+    <RootNamespace>SubEdit</RootNamespace>
+    <CrystalDir>C:\Program Files (x86)\Business Objects\Common\3.5\managed\dotnet2</CrystalDir>
+    <CrystalGacDir>C:\Windows\assembly\GAC_MSIL</CrystalGacDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+  </ItemGroup>
+
+  <ItemGroup>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Classic engine assemblies (11.5.3700.0 - a different build number from the RAS assemblies below,
+      which are 11.5.3300.0; they interoperate correctly). ReportDocument.Load(path) is how we open a
+      report; ReportDocument.ReportClientDocument bridges into the RAS object model below without
+      constructing ReportClientDocument directly (see CrystalSession's class remarks for why).
+      GAC-resident, but referenced by HintPath + Private so they are still copied next to the exe like
+      the RAS assemblies, rather than relying on the GAC being present on every machine that runs this.
+    -->
+    <Reference Include="CrystalDecisions.CrystalReports.Engine">
+      <HintPath>$(CrystalGacDir)\CrystalDecisions.CrystalReports.Engine\11.5.3700.0__692fbea5521e1304\CrystalDecisions.CrystalReports.Engine.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.Shared">
+      <HintPath>$(CrystalGacDir)\CrystalDecisions.Shared\11.5.3700.0__692fbea5521e1304\CrystalDecisions.Shared.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.ClientDoc">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ClientDoc.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.Controllers">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.Controllers.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.ReportDefModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ReportDefModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.CommonObjectModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.CommonObjectModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.DataDefModel">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.DataDefModel.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.CommLayer">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.CommLayer.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="CrystalDecisions.ReportAppServer.ObjectFactory">
+      <HintPath>$(CrystalDir)\CrystalDecisions.ReportAppServer.ObjectFactory.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+</Project>
