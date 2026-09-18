@@ -1429,3 +1429,35 @@ sub-report, then export. Page counts and rendered values both come out, and the 
 
 Two traps: `Table.Location` carries the result-set suffix (`sp_x;1`) that SqlClient reads as a
 numbered-procedure reference and must be stripped, and `Table.Name` is the ALIAS, not the procedure.
+
+## Measured while porting the operations to the PowerShell skill (2026-09-17)
+
+The skill (`skill/vibey-reports`) now carries all 31 operations. It was checked by running 14 plans
+through both engines and diffing the SAVED reports (re-read by the same reader): all 14 identical,
+and both validators reject exactly the same operations. Its reader matches the worker's on 1,578
+field comparisons across two fixtures. Things that turned up:
+
+- **Loading Crystal by partial name picks the newest engine.** With the Crystal Reports 13 runtime
+  also installed, `LoadWithPartialName('CrystalDecisions.CrystalReports.Engine')` returned
+  13.0.4000.0 and `ReportDocument` failed to construct (its 13.x `CommLayer` was missing), so the
+  skill could not open any report. It now loads 11.5.3700.0 by full strong name. The worker was never
+  affected: its project references pin the version.
+- **The worker's `apply` response described the document in memory, not the saved file.** Crystal
+  changes some things only at save: setting a border side grew `DetailSection1` from 221 to 261
+  twips (four single sides also give 261; the dotted/double mix gave 301), and numeric formatting on
+  a String field is discarded. The worker reported 221 and `thousandsSeparator: false`; a fresh read
+  of its own saved file says 301 and `true`. **Fixed:** the worker now reads the saved file (still
+  under its temporary name, before it is moved over the destination) for its response, as the
+  skill does; `ProgramEndToEndTests.Apply_ReturnsTheSchemaOfTheSavedFileNotTheInMemoryDocument`
+  covers it.
+- **PowerShell COM quirks the C# code never meets.** Casting the sub-report link collection to
+  `ISCRSubreportLinks` fails ("Cannot convert the System.__ComObject value") - use it as returned.
+  Assigning a field to `GroupClass.ConditionField` / `SortClass.SortField` fails with dot notation -
+  use `InvokeMember`. A text run's `FontColor` is the opposite: dot notation works, `InvokeMember`
+  throws "Specified cast is not valid", and casting the run to `ISCRParagraphTextElement` first
+  hangs Crystal. `GroupController.Add` and `SortController.Add` return an index that leaks into a
+  PowerShell function's output unless voided.
+- **`0xFFFFFFFF` is -1 in Windows PowerShell 5.1.** The skill's "no colour set" check compared
+  against that literal and never matched, so every unset fill and background read as `#FFFFFF`.
+- **A text object's font lives on its paragraph run.** With no run font the saved text is
+  "MS Shell Dlg" 14pt bold whatever the object's own `FontColor` says.
